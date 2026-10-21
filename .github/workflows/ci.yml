@@ -82,6 +82,7 @@ jobs:
             --set rhoai.appsDomain=apps.example.com \
             --set rhoai.mlflowUri=https://mlflow.example.com \
             --set rhoai.maasHost=maas.example.com \
+            --set rhoai.gatewayNamespace=maas-gateway \
             --set model.endpoint=https://maas.example.com \
             --set model.name=example-model \
             --set model.apiKey=dummy \
