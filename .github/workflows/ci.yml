@@ -167,6 +167,7 @@ jobs:
           helm template ts charts/tableschnappi \
             -f charts/tableschnappi/values-maas.yaml \
             --set rhoai.appsDomain=apps.example.com \
+            --set rhoai.mlflowUri=https://mlflow.example.com \
             --set model.endpoint=https://maas.example.com \
             --set model.name=example-model \
             --set model.apiKey=dummy > /tmp/maas.yaml
