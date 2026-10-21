@@ -1,0 +1,32 @@
+{{- if .Values.workbench.enabled }}
+# v1, not v1alpha1. RHOAI 3.x serves this CRD at
+# datasciencepipelinesapplications.opendatahub.io/v1 only — a v1alpha1
+# manifest is rejected with "no matches for kind", which `helm template`
+# cannot see because it never talks to an API server. Caught by a
+# --dry-run=server against a real cluster.
+apiVersion: datasciencepipelinesapplications.opendatahub.io/v1
+kind: DataSciencePipelinesApplication
+metadata:
+  name: dspa
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+spec:
+  dspVersion: v2
+  objectStorage:
+    disableHealthCheck: false
+    enableExternalRoute: false
+    minio:
+      deploy: true
+      # Required by the v1 schema — the operator supplies no default, so
+      # omitting it fails admission even with the right apiVersion.
+      image: {{ .Values.workbench.minioImage | quote }}
+      pvcSize: {{ .Values.workbench.dspaPvcSize | default "10Gi" }}
+  database:
+    mariaDB:
+      deploy: true
+      {{- with .Values.workbench.mariadbImage }}
+      image: {{ . | quote }}
+      {{- end }}
+      pvcSize: {{ .Values.workbench.dspaPvcSize | default "10Gi" }}
+{{- end }}

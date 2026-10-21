@@ -1,0 +1,78 @@
+{{- if .Values.assistant.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "tableschnappi.fullname" . }}-wait-model
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+    app: wait-model
+  annotations:
+    # Weight 2: after the MLflow wait/seed hooks (0 and 1), before anything
+    # that actually calls the model. Without this a wrong endpoint or a bad
+    # token only shows up later as a confusing chat or garak failure.
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "2"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: wait-model
+    spec:
+      restartPolicy: Never
+      {{- include "tableschnappi.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: wait
+          image: curlimages/curl:8.6.0
+          {{- if include "tableschnappi.modelAuthEnabled" . }}
+          env:
+            - name: MODEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tableschnappi.modelSecretName" . }}
+                  key: token
+          {{- end }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              URL="{{ include "tableschnappi.modelEndpoint" . }}/v1/models"
+              MODEL="{{ include "tableschnappi.modelName" . }}"
+
+              if [ -z "{{ include "tableschnappi.modelEndpoint" . }}" ]; then
+                echo "model.endpoint (or rhoai.vllmEndpoint) is empty — set it to your"
+                echo "OpenAI-compatible base URL, with no trailing /v1."
+                exit 1
+              fi
+
+              echo "Waiting for model endpoint: $URL"
+
+              for i in $(seq 1 30); do
+                if [ -n "${MODEL_TOKEN:-}" ]; then
+                  body=$(curl -sk --max-time 10 -H "Authorization: Bearer $MODEL_TOKEN" "$URL" || true)
+                else
+                  body=$(curl -sk --max-time 10 "$URL" || true)
+                fi
+
+                if echo "$body" | grep -q '"data"'; then
+                  echo "  endpoint is up"
+                  if echo "$body" | grep -q "\"$MODEL\""; then
+                    echo "  model '$MODEL' is served — OK"
+                  else
+                    echo "  WARNING: '$MODEL' was not listed by /v1/models."
+                    echo "  The assistant will fail on the first chat turn if the name is wrong."
+                    echo "  Models reported: $(echo "$body" | tr ',' '\n' | grep '"id"' | head -5)"
+                  fi
+                  exit 0
+                fi
+                echo "  attempt $i/30 — not ready yet"
+                sleep 10
+              done
+
+              echo "Model endpoint did not respond at $URL after 5 minutes."
+              echo "Check model.endpoint, model.mode, and the token if this is a MaaS gateway."
+              exit 1
+{{- end }}

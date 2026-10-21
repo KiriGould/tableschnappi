@@ -1,0 +1,50 @@
+{{- if .Values.mcp.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tableschnappi.mcpService" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "tableschnappi.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: mcp-server
+  template:
+    metadata:
+      labels:
+        {{- include "tableschnappi.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mcp-server
+    spec:
+      {{- include "tableschnappi.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: mcp-server
+          image: {{ include "tableschnappi.image" (list . "mcpServer") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 3000
+          env:
+            - name: PORT
+              value: "3000"
+            - name: TABLESCHNAPPI_API
+              value: "http://{{ include "tableschnappi.backendService" . }}.{{ .Release.Namespace }}.svc.cluster.local:3001/api"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /readyz
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.resources.mcpServer | nindent 12 }}
+          securityContext:
+            {{- include "tableschnappi.securityContext" . | nindent 12 }}
+{{- end }}

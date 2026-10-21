@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tableschnappi.fullname" . }}-backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "tableschnappi.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        {{- include "tableschnappi.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: backend
+    spec:
+      {{- include "tableschnappi.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: backend
+          image: {{ include "tableschnappi.image" (list . "backend") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 3001
+              protocol: TCP
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3001"
+            {{- if .Values.assistant.enabled }}
+            - name: ASSISTANT_URL
+              value: "http://{{ include "tableschnappi.mlflowProxyService" . }}.{{ .Release.Namespace }}.svc.cluster.local:8000"
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3001
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.resources.backend | nindent 12 }}
+          securityContext:
+            {{- include "tableschnappi.securityContext" . | nindent 12 }}

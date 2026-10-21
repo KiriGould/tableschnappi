@@ -1,0 +1,66 @@
+# Build the garak red-team image on the cluster instead of on a laptop.
+#
+# Why bother: the image pins torch and resolves for linux/amd64, which is what
+# OpenShift nodes run. Building it on an Apple Silicon machine means QEMU
+# emulation — slow enough to be impractical, and easy to get subtly wrong.
+# An OpenShift build runs natively on an amd64 node and pushes straight into
+# the internal registry, so no external registry credentials are needed.
+#
+# Apply, then build from your working copy:
+#
+#   oc apply -f packages/garak/openshift-build.yaml -n <your-namespace>
+#   oc start-build tableschnappi-garak --from-dir=packages/garak --follow -n <your-namespace>
+#
+# Then point the chart at the result:
+#
+#   helm upgrade --install tableschnappi charts/tableschnappi \
+#     --set garak.enabled=true \
+#     --set garak.image=image-registry.openshift-image-registry.svc:5000/<your-namespace>/tableschnappi-garak:latest
+#
+# The build pod needs egress to pypi.org and download.pytorch.org.
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: tableschnappi-garak
+  labels:
+    app.kubernetes.io/name: tableschnappi
+    app.kubernetes.io/component: garak
+spec:
+  lookupPolicy:
+    local: true
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: tableschnappi-garak
+  labels:
+    app.kubernetes.io/name: tableschnappi
+    app.kubernetes.io/component: garak
+spec:
+  source:
+    # Binary source: the contents of packages/garak are uploaded by
+    # `oc start-build --from-dir`. Keeps the build independent of whether the
+    # repo is public, private, or only on your laptop.
+    type: Binary
+    binary: {}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: tableschnappi-garak:latest
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      # torch and transformers are large; a tighter limit gets the build
+      # OOM-killed during pip install.
+      cpu: "2"
+      memory: 4Gi
+  # garak's dependency tree is big enough that the default 10 minute timeout
+  # is not always enough on a busy cluster.
+  completionDeadlineSeconds: 2400

@@ -1,0 +1,95 @@
+# TableSchnappi — full local stack (frontend, backend, MCP server, assistant).
+#
+#   cp .env.example .env     # then pick a model backend in .env
+#   podman compose up --build
+#
+# Open http://localhost:8080
+#
+# The model itself is NOT run by this file. Point MODEL_BASE_URL at either a
+# local RamaLama server or a MaaS gateway — see .env.example.
+services:
+  backend:
+    image: localhost/tableschnappi-backend:dev
+    build:
+      context: .
+      dockerfile: packages/backend/Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: production
+      ASSISTANT_URL: http://assistant:8000
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Exposes the restaurant tools over MCP. The assistant calls every tool
+  # through here, so chat does not work without it.
+  mcp:
+    image: localhost/tableschnappi-mcp:dev
+    build:
+      context: .
+      dockerfile: packages/mcp-server/Dockerfile
+    environment:
+      TABLESCHNAPPI_API: http://backend:3001/api
+      PORT: "3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # The assistant: prompt handling, the tool-calling loop, and the guardrail
+  # checks. Talks to whatever OpenAI-compatible endpoint MODEL_BASE_URL names.
+  assistant:
+    image: localhost/tableschnappi-assistant:dev
+    build:
+      # This image's Dockerfile COPYs with no path prefix, so its context is
+      # its own directory, not the repo root. `dockerfile` is relative to
+      # `context` here (unlike the GitHub Actions build, which is repo-root
+      # relative).
+      context: packages/mlflow-proxy
+      dockerfile: Dockerfile
+      args:
+        # Skip garak locally: it is only used by the optional /garak/run
+        # sweep, and resolving it adds the better part of an hour to the
+        # build. Set true if you want that endpoint on your laptop.
+        INCLUDE_GARAK: "false"
+    environment:
+      BACKEND_URL: http://backend:3001
+      MCP_URL: http://mcp:3000/mcp
+      VLLM_URL: ${MODEL_BASE_URL:?set MODEL_BASE_URL in .env}/v1
+      VLLM_MODEL: ${MODEL_NAME:?set MODEL_NAME in .env}
+      OPENAI_API_KEY: ${MODEL_API_KEY:-EMPTY}
+      # No NeMo Guardrails deployment locally, so skip the shield call rather
+      # than waste a model round-trip on a check that cannot refuse.
+      GUARDRAILS_ENABLED: "false"
+      # vLLM-only request field. llama.cpp (what RamaLama serves) can reject
+      # it, so it is off by default locally. Set true if your endpoint is vLLM.
+      MODEL_EXTRA_BODY: ${MODEL_EXTRA_BODY:-false}
+      # Empty means no MLflow tracing — the assistant falls back to its
+      # built-in prompt and runs normally.
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-}
+    # No extra_hosts here on purpose. Podman supplies host.containers.internal
+    # itself, and a rootless Podman machine cannot resolve the "host-gateway"
+    # alias at all — declaring it stops this container from starting. Docker
+    # users point MODEL_BASE_URL at host.docker.internal, which Docker Desktop
+    # supplies natively. See .env.example.
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  frontend:
+    image: localhost/tableschnappi-frontend:dev
+    build:
+      context: .
+      dockerfile: packages/frontend/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      # Override the default 'tableschnappi-backend' with the compose service name
+      BACKEND_HOST: backend
+      NGINX_ENVSUBST_TEMPLATE_VARS: BACKEND_HOST
+    depends_on:
+      backend:
+        condition: service_healthy

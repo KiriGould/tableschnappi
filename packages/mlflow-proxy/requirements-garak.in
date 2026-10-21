@@ -1,0 +1,30 @@
+# garak, for the in-app red-team sweep behind /garak/run and /garak/status.
+#
+# OFF by default — build with --build-arg INCLUDE_GARAK=true to get the sweep
+# and its attack transcript. It costs image size: garak pulls torch and a large
+# ML tree. Pulling torch from PyTorch's CPU index instead of PyPI keeps the
+# CUDA runtime out — 13 nvidia-* packages plus triton, several GB of it — which
+# the assistant has no use for, since it invokes garak with
+# --model_type=openai against a remote endpoint and never loads a model
+# locally.
+#
+# requirements-garak.txt is compiled from BOTH this file and requirements.in,
+# as one complete set rather than an overlay, so when garak is wanted it
+# replaces the base pins. Regenerate with uv, for linux/amd64:
+#
+#   uv pip compile --python-platform x86_64-unknown-linux-gnu \
+#     --python-version 3.11 --index-strategy unsafe-best-match \
+#     -o requirements-garak.txt requirements.in requirements-garak.in
+#
+# It must be uv, not pip-compile. pip-compile backtracks through every release
+# of every LLM SDK garak supports and does not terminate — a run was killed at
+# three hours, still descending through anthropic 0.112. uv answers in under a
+# minute, and reports a real conflict as a conflict.
+#
+# unsafe-best-match is needed because the PyTorch CPU index below mirrors an
+# old tqdm that shadows PyPI's newer one, which garak requires. uv defaults to
+# first-index-wins to resist dependency confusion; both indexes here are
+# first-party, so letting it pick the best version across them is safe.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+garak>=0.15

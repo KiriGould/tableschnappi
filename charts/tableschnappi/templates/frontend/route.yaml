@@ -1,0 +1,22 @@
+{{- if .Values.route.enabled }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "tableschnappi.fullname" . }}-frontend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  {{- /* Without this guard an empty appsDomain renders a trailing-dot host,
+         which the API server rejects with an opaque validation error. */}}
+  host: {{ include "tableschnappi.fullname" . }}-frontend-{{ .Release.Namespace }}.{{ required "rhoai.appsDomain is required for the frontend Route. Find it with: oc get ingresses.config/cluster -o jsonpath='{.spec.domain}'" .Values.rhoai.appsDomain }}
+  to:
+    kind: Service
+    name: {{ include "tableschnappi.fullname" . }}-frontend
+  port:
+    targetPort: 8080
+  tls:
+    termination: {{ .Values.route.tls.termination }}
+    insecureEdgeTerminationPolicy: {{ .Values.route.tls.insecureEdgeTerminationPolicy }}
+{{- end }}

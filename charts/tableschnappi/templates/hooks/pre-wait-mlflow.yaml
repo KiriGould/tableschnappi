@@ -1,0 +1,53 @@
+{{- if .Values.mlflow.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "tableschnappi.fullname" . }}-wait-mlflow
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "tableschnappi.selectorLabels" . | nindent 8 }}
+        app: wait-mlflow
+    spec:
+      serviceAccountName: {{ include "tableschnappi.mlflowProxyService" . }}
+      {{- include "tableschnappi.imagePullSecrets" . | nindent 6 }}
+      restartPolicy: Never
+      containers:
+        - name: wait
+          image: curlimages/curl:8.6.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for MLflow at {{ required "rhoai.mlflowUri is required when mlflow.enabled=true. Copy it from the RHOAI dashboard under Experiments, e.g. https://rh-ai.<apps-domain>/mlflow . Set mlflow.enabled=false to run without tracing." .Values.rhoai.mlflowUri }} ..."
+              TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+              for i in $(seq 1 60); do
+                if curl -sk --max-time 5 "{{ required "rhoai.mlflowUri is required when mlflow.enabled=true. Copy it from the RHOAI dashboard under Experiments, e.g. https://rh-ai.<apps-domain>/mlflow . Set mlflow.enabled=false to run without tracing." .Values.rhoai.mlflowUri }}/api/2.0/mlflow/experiments/search?max_results=1" \
+                     -H "Authorization: Bearer ${TOKEN}" \
+                     -H "X-Mlflow-Workspace: {{ .Release.Namespace }}" -o /dev/null -w "%{http_code}" | grep -qE "^2"; then
+                  echo "MLflow is ready."
+                  exit 0
+                fi
+                echo "  attempt $i/60 — retrying in 5s..."
+                sleep 5
+              done
+              echo "ERROR: MLflow not reachable after 5 minutes." && exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "25m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+          securityContext:
+            {{- include "tableschnappi.securityContext" . | nindent 12 }}
+{{- end }}

@@ -1,0 +1,26 @@
+# Red-team sweep image used by the chart's optional post-install garak Job
+# (charts/tableschnappi/templates/hooks/post-garak-eval.yaml).
+#
+# ── Architecture ──────────────────────────────────────────────────────────────
+# This image is built and pinned for linux/amd64 only, because that is the
+# architecture OpenShift worker nodes run. Do not compile these pins on an
+# Apple Silicon machine without --platform linux/amd64: the resolution differs
+# and you will get a requirements file that cannot install on the cluster.
+#
+# ── Why the PyTorch CPU index ─────────────────────────────────────────────────
+# garak depends on torch for its HuggingFace-backed detectors. Resolving torch
+# from PyPI drags in the whole CUDA runtime — 13 nvidia-* packages plus triton,
+# several GB — all of which is dead weight here: the chart invokes garak with
+# --model_type=openai, so it is a plain HTTP client against a remote endpoint
+# and never runs a model locally. The cluster nodes have no GPU either.
+#
+# Pulling torch from PyTorch's CPU index instead keeps the detectors working
+# and drops the CUDA stack entirely.
+#
+# Compile with:
+#   podman run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.11-slim \
+#     sh -c "pip install -q pip-tools && pip-compile --strip-extras \
+#            -o requirements.txt requirements.in"
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+garak>=0.15

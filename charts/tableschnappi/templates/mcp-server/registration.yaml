@@ -1,0 +1,79 @@
+{{- if and .Values.mcp.enabled .Values.rhoai.maasHost }}
+{{- $gwNs := required "rhoai.gatewayNamespace is required when rhoai.maasHost is set — the chart writes an HTTPRoute and an MCPServerRegistration into that namespace, so there is no safe default. Ask whoever runs your gateway." .Values.rhoai.gatewayNamespace }}
+---
+# HTTPRoute — exposes the MCP server through the MaaS gateway.
+# Named/pathed off .Release.Namespace (unique per participant), not
+# .Release.Name (fixed to "tableschnappi" for everyone per the docs) —
+# otherwise every participant's HTTPRoute collides in the shared gateway
+# namespace.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Release.Namespace }}-mcp
+  namespace: {{ $gwNs }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+spec:
+  hostnames:
+    - {{ .Values.rhoai.maasHost }}
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: maas-default-gateway
+      namespace: openshift-ingress
+  rules:
+    - backendRefs:
+        - name: {{ include "tableschnappi.mcpService" . }}
+          namespace: {{ .Release.Namespace }}
+          port: 3000
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /mcp/{{ .Release.Namespace }}
+      timeouts:
+        request: 300s
+---
+# ReferenceGrant — authorizes the HTTPRoute above (which lives in
+# gatewayNamespace) to reference the MCP Service in this release's own
+# namespace. Gateway API requires this explicitly for any cross-namespace
+# backendRef; without it the route is rejected/ignored by the controller.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: {{ .Release.Namespace }}-mcp-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: {{ $gwNs }}
+  to:
+    - group: ""
+      kind: Service
+      name: {{ include "tableschnappi.mcpService" . }}
+---
+# MCPServerRegistration — makes the server discoverable in the MaaS hub.
+# Same per-namespace naming rationale as the HTTPRoute above.
+apiVersion: mcp.kuadrant.io/v1alpha1
+kind: MCPServerRegistration
+metadata:
+  name: {{ .Release.Namespace }}
+  namespace: {{ $gwNs }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+spec:
+  category:
+    - restaurant
+    - reservations
+  hint: "TableSchnappi restaurant reservation and table management MCP server"
+  path: /mcp/{{ .Release.Namespace }}
+  state: Enabled
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: {{ .Release.Namespace }}-mcp
+  userSpecificList: Disabled
+{{- end }}

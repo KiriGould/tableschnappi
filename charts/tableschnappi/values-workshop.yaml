@@ -1,0 +1,65 @@
+# ── Workshop values template ───────────────────────────────────────────────────
+# Copy this file, fill in the six required fields, then run:
+#
+#   helm install tableschnappi charts/tableschnappi \
+#     -n tableschnappi-<your-name> --create-namespace \
+#     -f values-workshop.yaml
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+rhoai:
+  # 1. Your cluster apps domain — ask your instructor
+  #    Example: apps.ocp.example.opentlc.com
+  appsDomain: ""
+
+  # 2. MLflow tracking URI — copy from RHOAI dashboard → Experiments
+  #    Example: https://rh-ai.apps.ocp.example.opentlc.com/mlflow
+  mlflowUri: ""
+
+  # 3. MaaS gateway hostname — ask your instructor
+  #    Example: maas.apps.ocp.example.opentlc.com
+  maasHost: ""
+
+  # 4. Namespace where the MaaS gateway lives — ask your instructor. Required
+  #    if maasHost is set: the chart writes an HTTPRoute and an
+  #    MCPServerRegistration into this namespace, so a wrong value writes
+  #    into someone else's.
+  #    Example: maas-gateway
+  gatewayNamespace: ""
+
+# Garak safety sweep takes ~5 minutes — enable if you want to run it
+garak:
+  enabled: false
+
+# 5. Where the assistant gets its LLM. The endpoint must be OpenAI-compatible
+#    and the model MUST support tool calling.
+model:
+  # self-hosted = a model running in the cluster; maas = a shared gateway
+  mode: self-hosted
+
+  # Base URL with NO trailing /v1 — the chart appends it.
+  #   oc get inferenceservice -n <your-model-namespace>
+  #   Example: http://<model-name>-predictor.<namespace>.svc.cluster.local:8080
+  endpoint: ""
+
+  # Exact model string the endpoint expects — verify with:
+  #   curl <endpoint>/v1/models
+  name: ""
+
+  # Only for an authenticated gateway. Helm creates the Secret from this;
+  # prefer --set model.apiKey=... over committing it here.
+  apiKey: ""
+
+# The workshop notebooks live in a workbench, so the "full workshop" profile
+# has to create one — this defaulted to false, which meant following the
+# README's own Quick Start produced no workbench and the notebook steps had
+# nowhere to run. Requires Data Science Pipelines and a notebook image.
+workbench:
+  enabled: true
+
+# Left off deliberately. It writes a cluster-wide singleton ConfigMap in
+# redhat-ods-applications: a second concurrent install fails on ownership,
+# and either person's uninstall deletes it for everyone. Enable it once,
+# out of band, for a single admin-managed install.
+genaiStudio:
+  enabled: false

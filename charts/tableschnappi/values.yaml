@@ -1,0 +1,190 @@
+# ── Images ────────────────────────────────────────────────────────────────────
+image:
+  registry: quay.io/kgoud
+  tag: latest
+  pullPolicy: Always
+
+# Optional — set if pulling from a private registry, e.g.:
+#   imagePullSecrets:
+#     - name: my-registry-secret
+imagePullSecrets: []
+
+components:
+  frontend:
+    repository: tableschnappi-frontend
+  backend:
+    repository: tableschnappi-backend
+  mcpServer:
+    repository: tableschnappi-mcp
+  mlflowProxy:
+    repository: tableschnappi-mlflow-proxy
+  garak:
+    repository: tableschnappi-garak
+
+# ── Model backend ──────────────────────────────────────────────────────────────
+# Where the assistant gets its LLM. Either way the endpoint must be
+# OpenAI-compatible and the model MUST support tool calling — the assistant
+# does everything through tools, so a model without it will chat but never
+# book a table.
+model:
+  #   self-hosted — a model you run in the cluster (KServe/vLLM), usually
+  #                 unauthenticated on the internal network.
+  #   maas        — a shared Models-as-a-Service gateway, needs a bearer token.
+  mode: self-hosted
+
+  # Base URL with NO trailing /v1 — the chart appends it.
+  #   self-hosted: http://<model>-predictor.<namespace>.svc.cluster.local:8080
+  #   maas:        https://<maas-host>
+  endpoint: ""
+
+  # Exact model string the endpoint expects. Check with:
+  #   curl -H "Authorization: Bearer <token>" <endpoint>/v1/models
+  name: ""
+
+  # maas only. Helm creates the Secret for you from this value, so there is no
+  # manual `oc create secret` step. Prefer --set model.apiKey=... or a values
+  # file you do not commit.
+  apiKey: ""
+
+  # Set instead of apiKey if you manage the token outside Helm. Must contain
+  # the token under the key "token".
+  existingSecret: ""
+
+# ── RHOAI cluster endpoints ────────────────────────────────────────────────────
+# Fill these in for your cluster. All are required unless the feature is disabled.
+rhoai:
+  # Base apps domain for Route hostnames. Find yours with:
+  #   oc get ingresses.config/cluster -o jsonpath='{.spec.domain}'
+  appsDomain: ""
+
+  # Legacy aliases for model.endpoint / model.name. Deliberately empty: they
+  # used to ship a real-looking default, which meant a missing model.endpoint
+  # silently fell back to a predictor in someone else's namespace and spent
+  # five minutes timing out instead of failing with a usable message.
+  vllmEndpoint: ""
+  vllmModel: ""
+
+  # MLflow tracking URI (external HTTPS URL from RHOAI dashboard)
+  mlflowUri: ""
+  mlflowExperiment: "restaurant-chatbot-traces"
+
+  # ClusterRole the RHOAI MLflow operator creates for data-plane access.
+  # Only used when mlflow.enabled. Name has varied between RHOAI releases:
+  #   oc get clusterrole | grep mlflow
+  mlflowIntegrationClusterRole: "mlflow-operator-mlflow-integration"
+
+  # Namespace where the MaaS gateway lives. The chart writes an HTTPRoute and
+  # an MCPServerRegistration INTO this namespace, so a default here means
+  # writing into someone else's. Required whenever maasHost is set; left
+  # empty so it fails with a message instead.
+  gatewayNamespace: ""
+  # MaaS gateway hostname
+  maasHost: ""
+
+  # Bearer token for the model endpoint, for gateways that require auth such
+  # as MaaS. Name of a Secret in the release namespace with the token under
+  # the key "token". Leave empty for an unauthenticated in-cluster vLLM.
+  #   oc create secret generic model-api-key --from-literal=token=<token>
+  modelApiKeySecret: ""
+
+# ── Feature flags ──────────────────────────────────────────────────────────────
+# The assistant service (image name: mlflow-proxy) hosts the chat feature: the
+# system prompt, the tool-calling loop, and the guardrail checks. Turn this off
+# only if you want the restaurant app without any chat — the backend has no
+# other target for ASSISTANT_URL.
+assistant:
+  enabled: true
+
+# MLflow tracing, prompt registry, and the seed/wait install hooks. Independent
+# of `assistant.enabled`: with this off, chat still works and the assistant
+# falls back to its built-in prompt with no tracing. Requires rhoai.mlflowUri.
+mlflow:
+  enabled: true
+
+guardrails:
+  enabled: true
+
+mcp:
+  enabled: true
+
+# Registers the MCP server in redhat-ods-applications for the GenAI Studio
+# playground. Requires cluster-admin access to redhat-ods-applications.
+# WARNING: this ConfigMap is a single shared, cluster-wide singleton keyed by
+# a fixed literal ("TableSchnappi-MCP-Server"), not per-release. If more than
+# one participant installs with this enabled, the second `helm install` will
+# fail (ownership conflict), and either participant's `helm uninstall` will
+# delete the whole ConfigMap for everyone else. Defaults to false — enable
+# only for a single admin-managed install, or apply it once out-of-band
+# instead of through each participant's `helm install`.
+genaiStudio:
+  enabled: false
+
+# Workshop workbench + Data Science Pipelines. Creates a DSPA, a Notebook CR
+# with the repo pre-cloned, and auto-imports the eval pipeline.
+# Seasonal RAG over the 24 sekki. OFF unless both are set.
+#
+# The assistant looks up today's solar term in the vector store and grounds
+# menu and seasonality answers in it. The store is NOT created by this chart:
+# run workshop/sekki_pipeline.py (or the manual path in the README), then put
+# the id it prints here. With either value empty the assistant skips the
+# lookup entirely and answers from its prompt, which is the default.
+sekki:
+  # e.g. http://lsd-genai-playground-service.<ns>.svc.cluster.local:8321
+  llamastackBase: ""
+  # the id printed by the ingestion, e.g. vs_<uuid>
+  vectorStoreId: ""
+
+workbench:
+  # Minio backs the pipeline artifact store. The v1 DSPA schema makes this
+  # image required and the operator supplies no default. Unsupported upstream
+  # for anything but dev and test, which is what this is.
+  minioImage: "quay.io/opendatahub/minio:RELEASE.2019-08-14T20-37-41Z-license-compliance"
+  # Optional. Leave empty to let the DSP operator choose.
+  mariadbImage: ""
+  enabled: false
+  image: image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/s2i-generic-data-science-notebook:3.5
+  storage: 5Gi
+  dspaPvcSize: 10Gi
+  repoUrl: https://github.com/KiriGould/tableschnappi
+  # Not needed for this repo, which is public. Set it only if you forked into
+  # a private repo: the name of a Secret with the token under the key "token".
+  githubTokenSecret: ""
+  # Submit an initial eval run immediately after pipeline import
+  autoRun: false
+
+# Garak post-install safety sweep. Runs a Job; does not block install.
+garak:
+  enabled: false
+  # Built from packages/garak/Dockerfile. Leave empty to resolve through
+  # image.registry + components.garak.repository + image.tag, like every other
+  # component. Set it only to pin a specific image from elsewhere.
+  #
+  # NOTE: this image is linux/amd64 only. garak depends on torch, and its
+  # pins are resolved for x86_64 against the PyTorch CPU index. OpenShift
+  # nodes are x86_64, so that is the only architecture worth building. If you
+  # are running OpenShift on arm64 nodes, this Job will not schedule — build
+  # your own arm64 image and point garak.image at it.
+  image: ""
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+resources:
+  frontend:
+    requests: { memory: "64Mi", cpu: "50m" }
+    limits:   { memory: "128Mi", cpu: "200m" }
+  backend:
+    requests: { memory: "128Mi", cpu: "100m" }
+    limits:   { memory: "512Mi", cpu: "500m" }
+  mcpServer:
+    requests: { memory: "128Mi", cpu: "100m" }
+    limits:   { memory: "256Mi", cpu: "300m" }
+  mlflowProxy:
+    requests: { memory: "256Mi", cpu: "100m" }
+    limits:   { memory: "512Mi", cpu: "500m" }
+
+# ── Route / ingress ────────────────────────────────────────────────────────────
+route:
+  # Set to false to skip creating OpenShift Routes (use your own ingress)
+  enabled: true
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

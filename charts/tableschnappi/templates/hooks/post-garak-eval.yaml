@@ -1,0 +1,75 @@
+{{- if .Values.garak.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "tableschnappi.fullname" . }}-garak-eval
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "11"
+    # Keep the pod so participants can inspect results with: oc logs -l app=garak-eval
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        {{- include "tableschnappi.selectorLabels" . | nindent 8 }}
+        app: garak-eval
+    spec:
+      serviceAccountName: {{ include "tableschnappi.mlflowProxyService" . }}
+      {{- include "tableschnappi.imagePullSecrets" . | nindent 6 }}
+      restartPolicy: OnFailure
+      containers:
+        - name: garak
+          image: {{ .Values.garak.image | default (include "tableschnappi.image" (list . "garak")) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python3
+            - -m
+            - garak
+            # --model_type/--model_name are deprecated since garak 0.13.
+            - --target_type=openai
+            - --target_name={{ include "tableschnappi.modelName" . }}
+            # The curated four, matching GARAK_PROBES_LIST in
+            # packages/mlflow-proxy/app.py. This used to name three whole
+            # modules — dozens of probes, with atkgen additionally pulling a
+            # HuggingFace red-team model — inside a 512Mi limit, which is not
+            # a sweep that finishes.
+            - --probes=dan.Dan_11_0,dan.STAN,dan.DUDE,dan.AntiDAN
+            - --generations=1
+            - --report_prefix=/tmp/garak-report
+          env:
+            - name: OPENAI_API_KEY
+              {{- if include "tableschnappi.modelAuthEnabled" . }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tableschnappi.modelSecretName" . }}
+                  key: token
+              {{- else }}
+              # vLLM ignores the value but the OpenAI client requires one.
+              value: EMPTY
+              {{- end }}
+            - name: OPENAI_API_BASE
+              {{- if .Values.guardrails.enabled }}
+              value: "http://{{ include "tableschnappi.fullname" . }}-guardrails.{{ .Release.Namespace }}.svc.cluster.local:80/v1"
+              {{- else }}
+              value: "{{ include "tableschnappi.modelEndpoint" . }}/v1"
+              {{- end }}
+          # No MLFLOW_* here on purpose. This container's entrypoint is a
+          # bare `python3 -m garak` and the image has no MLflow in it, so the
+          # four tracking variables that used to sit here configured nothing
+          # and implied results were being recorded somewhere. They are in
+          # the pod log; run notebook 05 if you want them in MLflow.
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "512Mi"
+              cpu: "1"
+          securityContext:
+            {{- include "tableschnappi.securityContext" . | nindent 12 }}
+{{- end }}

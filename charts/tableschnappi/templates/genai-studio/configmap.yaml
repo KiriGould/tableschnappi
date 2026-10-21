@@ -1,0 +1,19 @@
+{{- if and .Values.mcp.enabled .Values.genaiStudio.enabled }}
+---
+# This ConfigMap lives in redhat-ods-applications (cluster-level namespace).
+# It makes the MCP server selectable in the RHOAI GenAI Studio playground.
+# Requires cluster-admin access to redhat-ods-applications.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gen-ai-aa-mcp-servers
+  namespace: redhat-ods-applications
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+data:
+  TableSchnappi-MCP-Server: |
+    {
+      "url": "http://{{ include "tableschnappi.mcpService" . }}.{{ .Release.Namespace }}.svc.cluster.local:3000/mcp",
+      "description": "TableSchnappi restaurant reservation and table management server. Provides real-time table availability, wait times, menu lookup, and reservation booking. Tools: list_restaurants, get_restaurant_status, check_table_availability, get_wait_time, make_reservation, get_menu, find_alternative_restaurant."
+    }
+{{- end }}

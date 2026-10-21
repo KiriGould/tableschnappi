@@ -1,0 +1,12 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+# Range, not a pin: garak pulls litellm, which requires httpx>=0.28, and an
+# exact pin here made the garak lock unsolvable. The app only uses Client,
+# AsyncClient and post(), stable across 0.27 and 0.28.
+httpx>=0.27,<1.0
+mlflow[kubernetes]>=3.11
+openai>=1.30
+langgraph>=0.2
+langchain>=0.3
+langchain-openai>=0.2
+langchain-core>=0.3

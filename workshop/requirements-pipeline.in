@@ -1,0 +1,21 @@
+# Dependencies for compiling and submitting the Kubeflow pipelines
+# (eval_pipeline.py, sekki_pipeline.py). Separate from the notebook
+# requirements because kfp pins a narrow dependency range that does not
+# co-resolve cleanly with the docling/transformers stack.
+#
+# Installable as-is:
+#   pip install -r workshop/requirements-pipeline.in
+#
+# Or compile a pinned requirements-pipeline.txt first:
+#   podman run --rm -v "$PWD":/w -w /w python:3.11-slim \
+#     sh -c "pip install -q pip-tools && pip-compile --strip-extras \
+#            -o requirements-pipeline.txt requirements-pipeline.in"
+
+kfp==2.14.6
+
+# Only needed if you fork into a private repo and have to attach a token
+# Secret to the clone step. The pipelines do not import it otherwise.
+# kfp-kubernetes==2.14.6
+
+# Used by the workbench clone helper
+gitpython

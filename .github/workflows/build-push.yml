@@ -1,0 +1,93 @@
+name: Build & Push Images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/**"
+      - ".github/workflows/build-push.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "packages/**"
+
+env:
+  REGISTRY: quay.io
+  ORG: kgoud
+
+jobs:
+  build:
+    name: ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: tableschnappi-frontend
+            context: .
+            dockerfile: packages/frontend/Dockerfile
+            platforms: linux/amd64,linux/arm64
+
+          - service: tableschnappi-backend
+            context: .
+            dockerfile: packages/backend/Dockerfile
+            platforms: linux/amd64,linux/arm64
+
+          - service: tableschnappi-mcp
+            context: .
+            dockerfile: packages/mcp-server/Dockerfile
+            platforms: linux/amd64,linux/arm64
+
+          - service: tableschnappi-mlflow-proxy
+            context: packages/mlflow-proxy
+            dockerfile: packages/mlflow-proxy/Dockerfile
+            platforms: linux/amd64,linux/arm64
+
+          # Red-team sweep image for the chart's optional post-install Job.
+          # amd64 only: its pins come from the PyTorch CPU index and are
+          # resolved for x86_64, which is what OpenShift nodes run. Building
+          # a torch image for arm64 under QEMU emulation would take hours and
+          # nothing consumes it.
+          - service: tableschnappi-garak
+            context: packages/garak
+            dockerfile: packages/garak/Dockerfile
+            platforms: linux/amd64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Quay.io
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Docker meta (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.ORG }}/${{ matrix.service }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

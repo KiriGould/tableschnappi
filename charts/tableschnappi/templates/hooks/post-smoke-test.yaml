@@ -1,0 +1,74 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "tableschnappi.fullname" . }}-smoke-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "tableschnappi.selectorLabels" . | nindent 8 }}
+        app: smoke-test
+    spec:
+      {{- include "tableschnappi.imagePullSecrets" . | nindent 6 }}
+      restartPolicy: Never
+      containers:
+        - name: smoke
+          image: curlimages/curl:8.6.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              fail=0
+
+              # Deployments were just created by this same `helm install` — their
+              # readiness probes (initialDelaySeconds + periodSeconds) haven't
+              # necessarily passed yet, so a one-shot check races the rollout.
+              # Retry each check for up to ~60s before giving up.
+              check() {
+                name=$1; url=$2
+                for i in $(seq 1 12); do
+                  code=$(curl -sk --max-time 5 -o /dev/null -w "%{http_code}" "$url" || echo "000")
+                  if echo "$code" | grep -qE "^2"; then
+                    echo "  [OK]  $name ($code)"
+                    return
+                  fi
+                  sleep 5
+                done
+                echo "  [FAIL] $name — got $code from $url after 60s"
+                fail=1
+              }
+
+              echo "=== TableSchnappi smoke test ==="
+              check "backend /api/health"    "http://{{ include "tableschnappi.backendService" . }}.{{ .Release.Namespace }}.svc.cluster.local:3001/api/health"
+              check "frontend /"             "http://{{ include "tableschnappi.fullname" . }}-frontend.{{ .Release.Namespace }}.svc.cluster.local:8080/"
+              {{- if .Values.mcp.enabled }}
+              check "mcp-server /readyz"     "http://{{ include "tableschnappi.mcpService" . }}.{{ .Release.Namespace }}.svc.cluster.local:3000/readyz"
+              {{- end }}
+              {{- if .Values.assistant.enabled }}
+              check "mlflow-proxy /health"   "http://{{ include "tableschnappi.mlflowProxyService" . }}.{{ .Release.Namespace }}.svc.cluster.local:8000/health"
+              {{- end }}
+
+              echo "================================"
+              if [ "$fail" -eq 0 ]; then
+                echo "All checks passed."
+              else
+                echo "One or more checks failed — see above." && exit 1
+              fi
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "25m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+          securityContext:
+            {{- include "tableschnappi.securityContext" . | nindent 12 }}

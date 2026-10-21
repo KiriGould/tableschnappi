@@ -1,0 +1,146 @@
+{{- if .Values.workbench.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "tableschnappi.fullname" . }}-workbench
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.workbench.storage | default "5Gi" }}
+---
+apiVersion: kubeflow.org/v1
+kind: Notebook
+metadata:
+  name: {{ include "tableschnappi.fullname" . }}-workbench
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+    opendatahub.io/dashboard: "true"
+  annotations:
+    notebooks.opendatahub.io/inject-auth: "true"
+    opendatahub.io/username: admin
+spec:
+  template:
+    spec:
+      {{- include "tableschnappi.imagePullSecrets" . | nindent 6 }}
+      initContainers:
+        - name: clone-repo
+          image: registry.access.redhat.com/ubi9/python-311:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              TARGET=/opt/app-root/src/tableschnappi
+              if [ -d "$TARGET/.git" ]; then
+                echo "Repo already cloned — pulling latest"
+                cd "$TARGET" && git pull || true
+              else
+                pip install -q gitpython 2>/dev/null
+                python3 -c "
+              import git, os
+              token = os.environ.get('GITHUB_TOKEN', '')
+              url = '{{ .Values.workbench.repoUrl }}'
+              if token:
+                  url = url.replace('https://', f'https://{token}@')
+              git.Repo.clone_from(url, '/opt/app-root/src/tableschnappi')
+              print('Cloned', url.split('@')[-1])
+              "
+              fi
+          env:
+            {{- if .Values.workbench.githubTokenSecret }}
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.workbench.githubTokenSecret }}
+                  key: token
+            {{- end }}
+          volumeMounts:
+            - name: notebooks
+              mountPath: /opt/app-root/src
+          resources:
+            requests: { memory: "256Mi", cpu: "100m" }
+            limits: { memory: "512Mi", cpu: "500m" }
+          securityContext:
+            {{- include "tableschnappi.securityContext" . | nindent 12 }}
+      containers:
+        - name: workbench
+          image: {{ .Values.workbench.image }}
+          imagePullPolicy: Always
+          workingDir: /opt/app-root/src
+          ports:
+            - containerPort: 8888
+              name: notebook-port
+              protocol: TCP
+          env:
+            - name: NOTEBOOK_BASE_URL
+              value: "/notebook/{{ .Release.Namespace }}/{{ include "tableschnappi.fullname" . }}-workbench"
+            # Through the model helpers, like every other template. These read
+            # .Values.rhoai.vllm* directly, which are empty by default — so the
+            # notebooks' configuration cell would have been handed blanks and
+            # stopped on "Still to fill in".
+            - name: VLLM_URL
+              value: {{ include "tableschnappi.modelEndpoint" . | quote }}
+            - name: VLLM_MODEL
+              value: {{ include "tableschnappi.modelName" . | quote }}
+            {{- if include "tableschnappi.modelAuthEnabled" . }}
+            - name: MODEL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tableschnappi.modelSecretName" . }}
+                  key: token
+            {{- end }}
+            # The one value the notebooks want that the chart never supplied.
+            # Every one of them carried a 30-line detect_cluster_domain() that
+            # guessed it by slicing the MLflow hostname — which silently
+            # yields "redhat-ods-applications.svc" for an in-cluster tracking
+            # URI — followed by an assert that hard-aborts when the guess
+            # fails. appsDomain is already required for the Route, so just
+            # pass it.
+            - name: CLUSTER_DOMAIN
+              value: {{ required "rhoai.appsDomain is required" .Values.rhoai.appsDomain | quote }}
+            - name: MCP_URL
+              value: "http://{{ include "tableschnappi.mcpService" . }}.{{ .Release.Namespace }}.svc.cluster.local:3000/mcp"
+            - name: GUARDRAILS_URL
+              value: "http://{{ include "tableschnappi.fullname" . }}-guardrails.{{ .Release.Namespace }}.svc.cluster.local:80"
+            - name: ASSISTANT_URL
+              value: "http://{{ include "tableschnappi.mlflowProxyService" . }}.{{ .Release.Namespace }}.svc.cluster.local:8000"
+            - name: MLFLOW_TRACKING_URI
+              value: {{ .Values.rhoai.mlflowUri | quote }}
+            - name: MLFLOW_WORKSPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: MLFLOW_TRACKING_INSECURE_TLS
+              value: "true"
+            - name: MLFLOW_TRACKING_AUTH
+              value: "kubernetes-namespaced"
+            - name: MLFLOW_K8S_INTEGRATION
+              value: "true"
+          resources:
+            requests: { cpu: "2", memory: "4Gi" }
+            limits: { cpu: "4", memory: "8Gi" }
+          volumeMounts:
+            - name: notebooks
+              mountPath: /opt/app-root/src
+          readinessProbe:
+            httpGet:
+              path: /notebook/{{ .Release.Namespace }}/{{ include "tableschnappi.fullname" . }}-workbench/api
+              port: 8888
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /notebook/{{ .Release.Namespace }}/{{ include "tableschnappi.fullname" . }}-workbench/api
+              port: 8888
+            initialDelaySeconds: 60
+            periodSeconds: 10
+      volumes:
+        - name: notebooks
+          persistentVolumeClaim:
+            claimName: {{ include "tableschnappi.fullname" . }}-workbench
+{{- end }}

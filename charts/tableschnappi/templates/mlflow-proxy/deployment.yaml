@@ -1,0 +1,94 @@
+{{- if .Values.assistant.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tableschnappi.mlflowProxyService" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mlflow-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "tableschnappi.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: mlflow-proxy
+  template:
+    metadata:
+      labels:
+        {{- include "tableschnappi.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mlflow-proxy
+    spec:
+      serviceAccountName: {{ include "tableschnappi.mlflowProxyService" . }}
+      {{- include "tableschnappi.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: mlflow-proxy
+          image: {{ include "tableschnappi.image" (list . "mlflowProxy") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            {{- if .Values.mlflow.enabled }}
+            - name: MLFLOW_TRACKING_URI
+              value: {{ .Values.rhoai.mlflowUri | quote }}
+            - name: MLFLOW_K8S_INTEGRATION
+              value: "true"
+            - name: MLFLOW_EXPERIMENT
+              value: {{ .Values.rhoai.mlflowExperiment | quote }}
+            {{- else }}
+            # No tracking server: the assistant uses its built-in prompt and
+            # skips tracing. An empty URI also disables the in-cluster
+            # service-account auth that MLflow would otherwise require.
+            - name: MLFLOW_TRACKING_URI
+              value: ""
+            {{- end }}
+            {{- if include "tableschnappi.modelAuthEnabled" . }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tableschnappi.modelSecretName" . }}
+                  key: token
+            {{- end }}
+            - name: VLLM_MODEL
+              value: {{ include "tableschnappi.modelName" . | quote }}
+            - name: VLLM_URL
+              value: "{{ include "tableschnappi.modelEndpoint" . }}/v1"
+            - name: MCP_URL
+              value: "http://{{ include "tableschnappi.mcpService" . }}.{{ .Release.Namespace }}.svc.cluster.local:3000/mcp"
+            {{- if and .Values.sekki.llamastackBase .Values.sekki.vectorStoreId }}
+            # Seasonal RAG. Both are needed: with either unset the assistant
+            # skips the lookup and answers from the prompt alone. The store is
+            # built by workshop/sekki_pipeline.py — the chart does not create
+            # it, it only points at one that exists.
+            - name: LLAMASTACK_BASE
+              value: {{ .Values.sekki.llamastackBase | quote }}
+            - name: SEKKI_VECTOR_STORE_ID
+              value: {{ .Values.sekki.vectorStoreId | quote }}
+            {{- end }}
+            - name: BACKEND_URL
+              value: "http://{{ include "tableschnappi.backendService" . }}.{{ .Release.Namespace }}.svc.cluster.local:3001"
+            - name: GUARDRAILS_ENABLED
+              value: {{ .Values.guardrails.enabled | quote }}
+            - name: UPSTREAM_URL
+              {{- if .Values.guardrails.enabled }}
+              value: "http://{{ include "tableschnappi.fullname" . }}-guardrails.{{ .Release.Namespace }}.svc.cluster.local:80"
+              {{- else }}
+              value: {{ include "tableschnappi.modelEndpoint" . | quote }}
+              {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.resources.mlflowProxy | nindent 12 }}
+          securityContext:
+            {{- include "tableschnappi.securityContext" . | nindent 12 }}
+{{- end }}

@@ -1,0 +1,289 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks needs history to scan commits, not just the tree.
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: No real-looking defaults in application code
+        run: |
+          # The chart has been guarded against this for a while, but the
+          # guard only ever inspected rendered Helm output. The same stale
+          # endpoints sat in app.py and the workshop scripts untouched, so a
+          # missing env var dialled a predictor in a namespace nobody owns
+          # and spent five minutes timing out instead of failing.
+          hits=$(grep -rInE "my-first-model|llama-32-3b-instruct" \
+            packages/ workshop/ --include="*.py" --include="*.ts" --include="*.tsx" \
+            2>/dev/null || true)
+          if [ -n "$hits" ]; then
+            echo "$hits"
+            echo "::error::A real-looking cluster default is hardcoded in application code."
+            exit 1
+          fi
+          echo "No hardcoded cluster defaults in application code."
+
+      - name: Check for real cluster hostnames
+        run: |
+          # Credentials are gitleaks' job above. This check is only for
+          # ephemeral cluster hostnames, which gitleaks has no reason to know
+          # about and which leaked from this repo once already.
+          #
+          # Deliberately no credential literals here: spelling out the strings
+          # we are trying to keep out of a public repo would publish them in
+          # this file. Documented placeholders are filtered out so the docs can
+          # keep showing an example hostname.
+          hits=$(grep -rInE "sandbox[0-9]{3,4}\.opentlc\.com|[a-z0-9-]+\.redhatworkshops\.io" \
+            --exclude-dir=.git --exclude="ci.yml" . \
+            | grep -viE "example|CLUSTER_DOMAIN|cluster-xxx|<your" || true)
+
+          if [ -n "$hits" ]; then
+            echo "$hits"
+            echo "::error::Found what looks like a real cluster hostname."
+            exit 1
+          fi
+          echo "No real cluster hostnames found."
+
+  helm:
+    name: Helm lint and template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+
+      - name: Lint
+        run: helm lint charts/tableschnappi
+
+      - name: Render every feature flag
+        run: |
+          # The defaults hide garak, workbench and genaiStudio, so render with
+          # everything on or those templates are never exercised.
+          helm template ts charts/tableschnappi \
+            --set rhoai.appsDomain=apps.example.com \
+            --set rhoai.mlflowUri=https://mlflow.example.com \
+            --set rhoai.maasHost=maas.example.com \
+            --set model.endpoint=https://maas.example.com \
+            --set model.name=example-model \
+            --set model.apiKey=dummy \
+            --set garak.enabled=true \
+            --set workbench.enabled=true \
+            --set genaiStudio.enabled=true > /tmp/all.yaml
+
+          # `test -s` was the only assertion here, and it passes for any
+          # chart that renders at all — including ones that cannot install.
+          # Assert on the content instead.
+          fail=0
+
+          # A stale built-in default must never reach a rendered manifest.
+          # The ".svc" suffix used to be required here, which let the bare
+          # namespace name through — and gatewayNamespace defaulted to it,
+          # so the chart wrote an HTTPRoute into someone else's namespace.
+          if grep -nE "llama-32-3b-instruct|my-first-model" /tmp/all.yaml; then
+            echo "::error::A stale default model endpoint or namespace leaked into the render."
+            fail=1
+          fi
+
+          # An empty appsDomain used to produce `host: ts-frontend-default.`
+          if grep -nE "^\s+host:.*\.$" /tmp/all.yaml; then
+            echo "::error::Route host ends in a dot — appsDomain was not substituted."
+            fail=1
+          fi
+
+          # The token Secret must outrank the pre-install hooks that mount it.
+          python3 - <<'PY' || fail=1
+          import yaml, sys
+          docs = [d for d in yaml.safe_load_all(open('/tmp/all.yaml')) if d]
+          def weight(d):
+              a = (d.get('metadata', {}).get('annotations') or {})
+              return int(a.get('helm.sh/hook-weight', 0)) if 'helm.sh/hook' in a else None
+          secret = next((d for d in docs if d['kind'] == 'Secret'), None)
+          waiter = next((d for d in docs if d['kind'] == 'Job'
+                         and 'wait-model' in d['metadata']['name']), None)
+          if secret and waiter:
+              sw, ww = weight(secret), weight(waiter)
+              if sw is None or ww is None or sw >= ww:
+                  print(f"::error::Model Secret (weight {sw}) must be a hook ordered "
+                        f"before wait-model (weight {ww}), or the install deadlocks.")
+                  sys.exit(1)
+              print(f"ok: Secret weight {sw} precedes wait-model weight {ww}")
+          PY
+
+          exit $fail
+
+      - name: Required values must fail loudly, not render something broken
+        run: |
+          # Rendering with no values at all must error with a usable message,
+          # not emit a manifest the API server will reject later.
+          if helm template ts charts/tableschnappi > /dev/null 2>/tmp/err; then
+            echo "::error::Chart rendered with no required values set; it should have failed."
+            exit 1
+          fi
+          grep -q "is required" /tmp/err || {
+            echo "::error::Failure message does not explain which value is missing:"
+            cat /tmp/err
+            exit 1
+          }
+          echo "ok: missing values fail with - $(grep -o '[a-zA-Z.]* is required' /tmp/err | head -1)"
+
+      - name: Render the workshop profile
+        run: |
+          # Never rendered before, so its own defaults were untested.
+          helm template ts charts/tableschnappi \
+            -f charts/tableschnappi/values-workshop.yaml \
+            --set rhoai.appsDomain=apps.example.com \
+            --set rhoai.mlflowUri=https://mlflow.example.com \
+            --set model.endpoint=https://model.example.com \
+            --set model.name=example-model > /tmp/workshop.yaml
+          # The workshop path claims to include the notebooks, so it must
+          # actually create a workbench.
+          grep -q "kind: Notebook" /tmp/workshop.yaml || {
+            echo "::error::Workshop profile renders no Notebook — the notebook steps would have nowhere to run."
+            exit 1
+          }
+
+      - name: Render the minimal MaaS profile
+        run: |
+          helm template ts charts/tableschnappi \
+            -f charts/tableschnappi/values-maas.yaml \
+            --set rhoai.appsDomain=apps.example.com \
+            --set model.endpoint=https://maas.example.com \
+            --set model.name=example-model \
+            --set model.apiKey=dummy > /tmp/maas.yaml
+          # The minimal profile must pull in no CRDs at all.
+          if grep -qE "kind: (NemoGuardrails|MCPServerRegistration|Notebook|DataSciencePipelinesApplication)" /tmp/maas.yaml; then
+            echo "::error::Minimal profile rendered a CRD it should not need."
+            exit 1
+          fi
+      - name: Turning MLflow off must drop its RBAC
+        run: |
+          # The MLflow RoleBinding targets an operator-created ClusterRole,
+          # which RBAC refuses to bind for a namespace-scoped user. It was
+          # once gated on assistant.enabled, so it rendered even with MLflow
+          # off. The MaaS profile ships with tracing ON — that is the point of
+          # the demo — so the invariant to protect is the opt-out path.
+          helm template ts charts/tableschnappi \
+            -f charts/tableschnappi/values-maas.yaml \
+            --set mlflow.enabled=false \
+            --set rhoai.appsDomain=apps.example.com \
+            --set model.endpoint=https://maas.example.com \
+            --set model.name=example-model > /tmp/nomlflow.yaml
+          if grep -q "kind: RoleBinding" /tmp/nomlflow.yaml; then
+            echo "::error::mlflow.enabled=false still rendered the MLflow RoleBinding."
+            exit 1
+          fi
+
+  honesty:
+    name: A failed scan must not report as safe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No fabricated safety numbers
+        run: |
+          # Every one of these shipped at some point, and each turned "the
+          # sweep did not run" into "100% SAFE" for a project whose whole
+          # subject is AI safety. They are cheap to grep for and expensive
+          # to notice by eye.
+          fail=0
+
+          # The backend floor that hid five separate garak faults.
+          if grep -nE "attempts == 0:\s*$" -A1 packages/mlflow-proxy/app.py \
+               | grep -qE "attempts = 1"; then
+            echo "::error::app.py floors attempts at 1, which scores a crashed probe as a pass."
+            fail=1
+          fi
+
+          # The frontend equivalent. The headline ASR must be null when
+          # nothing was measured, and each probe row must consult `failed`
+          # before painting itself as a pass. (A per-probe asr of 0 is fine
+          # on its own — it is only read when the probe did not fail.)
+          V=packages/frontend/src/views/VisitorPage.tsx
+          if ! grep -qE "const overallASR = totalAttempts > 0 \?.*: null" "$V"; then
+            echo "::error::overallASR must be null when totalAttempts is 0, not 0."
+            fail=1
+          fi
+          if ! grep -qE "const failed = p\.failed \|\| p\.attempts === 0" "$V"; then
+            echo "::error::Probe rows must derive `failed` before rendering a verdict."
+            fail=1
+          fi
+
+          # The probe list must pin a detector per probe. Without it garak
+          # adds mitigation.MitigationBypass, which reads a non-English
+          # refusal as a successful jailbreak.
+          python3 - <<'PY' || fail=1
+          import re, sys
+          src = open("packages/mlflow-proxy/app.py").read()
+          block = re.search(r"GARAK_PROBES_LIST = \[(.*?)\n\]", src, re.S)
+          if not block:
+              print("::error::GARAK_PROBES_LIST not found"); sys.exit(1)
+          rows = re.findall(r"\(([^)]*)\)", block.group(1))
+          bad = [r for r in rows if len(r.split(",")) < 5]
+          if bad:
+              print("::error::Every probe must name its own detector: %s" % bad)
+              sys.exit(1)
+          print("ok: %d probes, each with a pinned detector" % len(rows))
+          PY
+
+          exit $fail
+
+  images:
+    name: Referenced images are pullable
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every default image must be anonymously pullable
+        run: |
+          # The README tells people these are public. They were not, and four
+          # of five returned 401 — every cluster install died in
+          # ImagePullBackOff for everyone except the maintainer.
+          registry=$(grep -A1 '^image:' charts/tableschnappi/values.yaml | grep 'registry:' | awk '{print $2}')
+          echo "registry: $registry"
+          fail=0
+
+          # Only the components a DEFAULT install pulls. garak is deliberately
+          # excluded: garak.enabled defaults to false and the image is meant to
+          # be built by the user (packages/garak/openshift-build.yaml), so
+          # asserting on it would fail every run until someone publishes one.
+          for repo in $(grep -A2 -E '^\s+(frontend|backend|mcpServer|mlflowProxy):' \
+                          charts/tableschnappi/values.yaml | grep 'repository:' | awk '{print $2}'); do
+            if skopeo inspect --no-tags "docker://$registry/$repo:latest" > /dev/null 2>&1; then
+              echo "  ok            $repo"
+            else
+              echo "  NOT PULLABLE  $repo"
+              fail=1
+            fi
+          done
+
+          # Informational only — never fails the build.
+          garak=$(grep -A2 -E '^\s+garak:' charts/tableschnappi/values.yaml | grep 'repository:' | awk '{print $2}')
+          if skopeo inspect --no-tags "docker://$registry/$garak:latest" > /dev/null 2>&1; then
+            echo "  ok            $garak (optional)"
+          else
+            echo "  note: $garak is not published; build it yourself to use garak.enabled=true"
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::At least one default image is not anonymously pullable. Either make the repository public or change image.registry and document a build-first step."
+            exit 1
+          fi

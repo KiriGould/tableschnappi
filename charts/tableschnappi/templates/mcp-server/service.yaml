@@ -1,0 +1,17 @@
+{{- if .Values.mcp.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tableschnappi.mcpService" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp-server
+spec:
+  selector:
+    {{- include "tableschnappi.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp-server
+  ports:
+    - port: 3000
+      targetPort: 3000
+{{- end }}

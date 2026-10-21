@@ -1,0 +1,32 @@
+# Dependencies for the workshop notebooks (01-06 and prompt-tuning-workshop).
+#
+# The RHOAI s2i-generic-data-science-notebook image already provides several
+# of these, but listing them here means the notebooks also run on a plain
+# laptop.
+#
+# Installable as-is:
+#   pip install -r workshop/requirements-notebooks.in
+#
+# Or compile a pinned requirements-notebooks.txt first:
+#   podman run --rm -v "$PWD":/w -w /w python:3.11-slim \
+#     sh -c "pip install -q pip-tools && pip-compile --strip-extras \
+#            -o requirements-notebooks.txt requirements-notebooks.in"
+
+mlflow[kubernetes]>=3.11
+openai>=1.30
+httpx
+requests
+urllib3
+
+# Data handling and plots used across the evaluation notebooks
+pandas
+numpy
+matplotlib
+seaborn
+plotly
+ipywidgets
+
+# Sekki PDF generation and ingestion
+fpdf2>=2.7.9
+docling>=2.0.0
+transformers

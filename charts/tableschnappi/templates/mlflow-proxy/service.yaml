@@ -1,0 +1,17 @@
+{{- if .Values.assistant.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tableschnappi.mlflowProxyService" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mlflow-proxy
+spec:
+  selector:
+    {{- include "tableschnappi.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: mlflow-proxy
+  ports:
+    - port: 8000
+      targetPort: 8000
+{{- end }}

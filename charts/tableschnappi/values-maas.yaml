@@ -1,0 +1,94 @@
+# ── Minimal cluster profile: app + chat against a MaaS gateway ────────────────
+#
+# For coworkers who want the running demo without the full workshop stack.
+# Deploys frontend, backend, MCP server, the assistant, and MLflow tracing.
+#
+# Compared with the workshop install this needs NO Kuadrant or Gateway setup,
+# and none of the kserve / ogx / aigateway / trustyai / mcplifecycleoperator
+# components. It does need the MLflow operator, because tracing is on — see
+# the mlflow block below if you would rather drop it.
+#
+# One command, no manual secret creation — Helm makes the Secret itself:
+#
+#   oc new-project tableschnappi-$(oc whoami)
+#
+#   helm install tableschnappi charts/tableschnappi \
+#     -f charts/tableschnappi/values-maas.yaml \
+#     --set rhoai.appsDomain=<your-apps-domain> \
+#     --set model.endpoint=https://<maas-host> \
+#     --set model.name=<model-id> \
+#     --set model.apiKey=<your-token>
+#
+#   oc get route tableschnappi-frontend
+#
+# A pre-install hook checks the endpoint answers and that the model is served
+# before anything else starts, so a wrong URL or token fails fast and clearly.
+#
+# Find the model id with:
+#   curl -H "Authorization: Bearer <token>" https://<maas-host>/v1/models
+#
+# For a model you host in the cluster instead, set model.mode=self-hosted and
+# point model.endpoint at its internal service — no token needed.
+# ──────────────────────────────────────────────────────────────────────────────
+
+model:
+  mode: maas
+
+  # Required: the MaaS gateway base URL. "/v1" is appended by the chart, so
+  # give the base only — https://<maas-host>, not https://<maas-host>/v1.
+  endpoint: ""
+
+  # Required: the exact model string the gateway expects. Must support tool
+  # calling — the assistant works entirely through tools.
+  name: ""
+
+  # Pass with --set model.apiKey=... rather than committing it here.
+  # Or set model.existingSecret to a Secret you manage yourself.
+  apiKey: ""
+
+rhoai:
+  # Required: your cluster apps domain, for the frontend Route hostname.
+  #   oc get ingresses.config/cluster -o jsonpath='{.spec.domain}'
+  appsDomain: ""
+
+  # Required while mlflow.enabled: the RHOAI tracking server. In-cluster:
+  #   https://mlflow.redhat-ods-applications.svc:8443/mlflow
+  mlflowUri: ""
+
+# Chat on, everything workshop-related off.
+assistant:
+  enabled: true
+
+# MCP server stays on: the assistant calls every tool through it.
+mcp:
+  enabled: true
+
+# ON. Tracing is the point of the demo, and it is independent of where the
+# model runs — MaaS decides where inference happens, MLflow records what
+# happened. Shipping this profile with tracing off conflated the two and left
+# the documented MaaS path with no observability at all.
+#
+# Requires the RHOAI MLflow operator and rhoai.mlflowUri. Note this profile is
+# then no longer strictly "no cluster-admin": the RoleBinding to the operator's
+# ClusterRole needs bind permission. Set mlflow.enabled=false if you only have
+# namespace rights and are willing to lose tracing.
+mlflow:
+  enabled: true
+
+# Off: needs the TrustyAI operator for the NeMo Guardrails CRD. The assistant
+# skips the shield calls; the in-code reservation checks still apply.
+guardrails:
+  enabled: false
+
+# Off: cluster-wide singleton ConfigMap, needs cluster-admin, and conflicts
+# between concurrent installs.
+genaiStudio:
+  enabled: false
+
+# Off: needs Data Science Pipelines and a workbench image.
+workbench:
+  enabled: false
+
+# Off: a ~5 minute post-install red-team sweep against guardrails.
+garak:
+  enabled: false

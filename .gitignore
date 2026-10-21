@@ -1,0 +1,22 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.local
+__pycache__/
+*.pyc
+.DS_Store
+*.log
+my-values.yaml
+.claude/
+
+# Generated or downloaded at build time — never commit
+workshop/fonts/
+workshop/sekki_pdfs/
+workshop/pipelines_gen/
+*.ttf
+*.pdf
+
+# Security assessments stay out of the repo
+*-security-report.md

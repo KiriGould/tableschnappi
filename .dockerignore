@@ -1,0 +1,10 @@
+node_modules
+packages/*/node_modules
+packages/*/dist
+deploy
+.git
+.gitignore
+*.md
+.env*
+scripts
+docker-compose.yml

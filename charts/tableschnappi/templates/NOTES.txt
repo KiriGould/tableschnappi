@@ -1,0 +1,21 @@
+TableSchnappi has been deployed!
+
+App URL:
+  https://{{ include "tableschnappi.fullname" . }}-frontend-{{ .Release.Namespace }}.{{ .Values.rhoai.appsDomain }}
+
+MCP server (internal):
+  http://{{ include "tableschnappi.mcpService" . }}.{{ .Release.Namespace }}.svc.cluster.local:3000/mcp
+
+{{- if .Values.mlflow.enabled }}
+
+MLflow experiment:
+  {{ .Values.rhoai.mlflowUri }}/  →  Experiments → {{ .Values.rhoai.mlflowExperiment }}
+{{- end }}
+
+{{- if .Values.garak.enabled }}
+
+Garak evaluation job is running in the background.
+Check results:  oc logs -n {{ .Release.Namespace }} -l helm.sh/hook=post-install,app=garak-eval
+{{- end }}
+
+Docs: https://github.com/KiriGould/tableschnappi

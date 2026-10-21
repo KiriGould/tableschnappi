@@ -1,0 +1,112 @@
+{{- if .Values.workbench.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tableschnappi.fullname" . }}-pipeline-yaml
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "19"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+data:
+  chatbot_eval_pipeline.yaml: |
+{{ .Files.Get "files/chatbot_eval_pipeline.yaml" | indent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "tableschnappi.fullname" . }}-import-pipeline
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tableschnappi.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "20"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "tableschnappi.selectorLabels" . | nindent 8 }}
+        app: import-pipeline
+    spec:
+      {{- include "tableschnappi.imagePullSecrets" . | nindent 6 }}
+      restartPolicy: Never
+      containers:
+        - name: import
+          image: registry.access.redhat.com/ubi9/python-311:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              pip install -q kfp==2.14.6 2>/dev/null
+
+              DSPA_HOST="https://ds-pipeline-dspa.{{ .Release.Namespace }}.svc.cluster.local:8443"
+              TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+
+              echo "Waiting for DSPA at $DSPA_HOST ..."
+              for i in $(seq 1 60); do
+                code=$(curl -sk -o /dev/null -w "%{http_code}" "$DSPA_HOST/apis/v2beta1/healthz" \
+                  -H "Authorization: Bearer $TOKEN" || echo "000")
+                if echo "$code" | grep -qE "^2"; then
+                  echo "DSPA is ready."
+                  break
+                fi
+                echo "  attempt $i/60 ($code) — retrying in 5s..."
+                sleep 5
+              done
+
+              python3 - <<'PYEOF'
+              import os, ssl
+              os.environ["KF_PIPELINES_SA_TOKEN_PATH"] = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+              import kfp
+              client = kfp.Client(
+                  host="https://ds-pipeline-dspa.{{ .Release.Namespace }}.svc.cluster.local:8443",
+                  ssl_ca_cert=False,
+              )
+
+              pipeline_file = "/pipelines/chatbot_eval_pipeline.yaml"
+              name = "tableschnappi-chatbot-eval"
+
+              existing = client.list_pipelines(filter='{"predicates":[{"key":"name","operation":"EQUALS","string_value":"' + name + '"}]}')
+              if existing.pipelines:
+                  pid = existing.pipelines[0].pipeline_id
+                  print(f"Pipeline '{name}' exists (id={pid}) — uploading new version")
+                  client.upload_pipeline_version(pipeline_file, pipeline_version_name="{{ .Chart.Version }}", pipeline_id=pid)
+              else:
+                  result = client.upload_pipeline(pipeline_file, pipeline_name=name)
+                  print(f"Imported pipeline: {result.pipeline_id}")
+
+              {{- if .Values.workbench.autoRun }}
+              print("Submitting initial evaluation run...")
+              run = client.create_run_from_pipeline_package(
+                  pipeline_file,
+                  run_name="chatbot-eval-initial",
+                  arguments={
+                      "mlflow_uri": {{ .Values.rhoai.mlflowUri | quote }},
+                      "assistant_url": "http://{{ include "tableschnappi.mlflowProxyService" . }}.{{ .Release.Namespace }}.svc.cluster.local:8000/assistant",
+                  },
+                  enable_caching=False,
+              )
+              print(f"Run submitted: {run.run_id}")
+              {{- end }}
+              PYEOF
+          volumeMounts:
+            - name: pipeline-yaml
+              mountPath: /pipelines
+          resources:
+            requests: { memory: "256Mi", cpu: "100m" }
+            limits: { memory: "512Mi", cpu: "500m" }
+          securityContext:
+            {{- include "tableschnappi.securityContext" . | nindent 12 }}
+      volumes:
+        - name: pipeline-yaml
+          configMap:
+            name: {{ include "tableschnappi.fullname" . }}-pipeline-yaml
+{{- end }}
