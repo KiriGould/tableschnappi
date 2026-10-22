@@ -268,9 +268,31 @@ def ingest_to_vector_store(
         vs_id = vs["id"]
         print(f"Using existing vector store: {vs_id}")
     else:
+        # Resolve the embedding model against what this LlamaStack actually
+        # serves. Providers prefix their identifiers -- the granite embedder
+        # is registered as "sentence-transformers/ibm-granite/..." -- so the
+        # bare name is rejected with "Model not found" and the whole stage
+        # dies on a 400.
+        wanted = embedding_model
+        try:
+            served = [m.get("identifier") or m.get("id") for m in
+                      (get("/v1/models").get("data") or get("/v1/models"))]
+            served = [m for m in served if m]
+            match = next((m for m in served if m == wanted), None) \
+                 or next((m for m in served if m.endswith("/" + wanted)), None) \
+                 or next((m for m in served if wanted in m), None)
+            if match and match != wanted:
+                print(f"Resolved embedding model {wanted} -> {match}")
+                wanted = match
+            elif not match:
+                print(f"WARNING: {wanted} is not in this LlamaStack's model list; "
+                      f"trying it anyway. Available: {served}")
+        except Exception as e:
+            print("Could not list models, using the name as given:", e)
+
         vs_id = post("/v1/vector_stores", {
             "name":                vector_store_name,
-            "embedding_model":     embedding_model,
+            "embedding_model":     wanted,
             "embedding_dimension": 768,  # granite-embedding-125m-english output size
         })["id"]
         print(f"Created vector store: {vs_id}")
