@@ -297,21 +297,40 @@ def ingest_to_vector_store(
         })["id"]
         print(f"Created vector store: {vs_id}")
 
-    # Skip already-ingested chunks (idempotent re-runs)
+    # Skip chunks already in this store, so a re-run is idempotent.
+    #
+    # This used to collect LlamaStack file ids (file-xxxx) and compare them
+    # with chunk ids (01_shokan__chunk_000). They never matched, so nothing
+    # was ever skipped and every re-run added another full copy of all 24
+    # documents. Match on filename instead, which is what carries the chunk
+    # id across the two APIs.
+    existing_names = set()
     try:
-        existing_ids = {f["id"] for f in get(f"/v1/vector_stores/{vs_id}/files?limit=500").get("data", [])}
-    except Exception:
-        existing_ids = set()
+        store_file_ids = [f["id"] for f in
+                          get(f"/v1/vector_stores/{vs_id}/files?limit=500").get("data", [])]
+        by_id = {f["id"]: f.get("filename", "") for f in
+                 get("/v1/files?limit=1000").get("data", [])}
+        existing_names = {by_id.get(i, "") for i in store_file_ids} - {""}
+        print(f"Store already holds {len(existing_names)} document(s)")
+    except Exception as e:
+        print("Could not list existing files, will insert everything:", e)
 
     inserted = 0
     for chunk in chunks:
-        if chunk["id"] in existing_ids:
+        if f"{chunk['id']}.md" in existing_names:
             continue
-        file_id = post("/v1/files", {
-            "purpose": "assistants",
-            "file":    chunk["text"],
-            "filename": f"{chunk['id']}.txt",
-        })["id"]
+        # /v1/files is multipart/form-data, not JSON. Posting JSON here
+        # returned a bare 400 with no hint about the content type.
+        fr = httpx.post(
+            f"{llamastack_base}/v1/files",
+            data={"purpose": "assistants"},
+            files={"file": (f"{chunk['id']}.md", chunk["text"].encode("utf-8"),
+                            "text/markdown")},
+            timeout=120,
+        )
+        fr.raise_for_status()
+        file_id = fr.json()["id"]
+        # Attaching chunks the store: LlamaStack does the embedding.
         post(f"/v1/vector_stores/{vs_id}/files", {"file_id": file_id})
         inserted += 1
 
