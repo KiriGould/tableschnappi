@@ -34,15 +34,12 @@ pipeline definition.
 
 import os
 from kfp import dsl, compiler
+from kfp import kubernetes
 
 # -- Base images (matching opendatahub-io/data-processing) ---------------------
 PYTHON_BASE_IMAGE  = os.getenv(
     "PYTHON_BASE_IMAGE",
     "registry.access.redhat.com/ubi9/python-311:9.6-1755074620",
-)
-DOCLING_BASE_IMAGE = os.getenv(
-    "DOCLING_BASE_IMAGE",
-    "quay.io/fabianofranz/docling-ubi9:2.54.0",
 )
 
 # -- Defaults -------------------------------------------------------------------
@@ -52,6 +49,11 @@ LLAMASTACK    = os.environ.get("LLAMASTACK_BASE", "")
 MLFLOW_URI    = os.getenv("MLFLOW_URI", "")
 MLFLOW_EXP    = "restaurant-chatbot-traces"
 VS_NAME       = "sakura-sekki-knowledge"
+# docling-serve, reached through the platform gateway. No default host: a
+# real-looking one dials somebody else's cluster.
+DOCLING_URL   = os.environ.get("DOCLING_URL", "")
+DOCLING_MODEL = os.environ.get("DOCLING_MODEL", "Docling")
+DOCLING_SECRET= os.environ.get("DOCLING_SECRET", "docling-gateway")
 EMBED_MODEL   = "ibm-granite/granite-embedding-125m-english"
 
 
@@ -69,7 +71,14 @@ def clone_repo(
     import subprocess
     from pathlib import Path
 
-    dest = "/tmp/tableschnappi"
+    # Clone INTO the output artifact, not into /tmp. Each KFP step is its own
+    # pod, so a local path handed to the next step points at nothing -- this
+    # used to write /tmp/tableschnappi here and read it back in stage 2, which
+    # failed with FileNotFoundError every time. Only the artifact crosses the
+    # step boundary, so the files have to live inside it.
+    out = Path(repo_dir.path)
+    out.mkdir(parents=True, exist_ok=True)
+    dest = str(out / "repo")
 
     # The repo is public, so this clones anonymously. If you fork privately,
     # set GITHUB_TOKEN on this step and the URL is rewritten to use it.
@@ -80,10 +89,8 @@ def clone_repo(
 
     subprocess.run(["git", "clone", "--depth=1", clone_url, dest], check=True)
 
-    out = Path(repo_dir.path)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "repo_path.txt").write_text(dest)
-    print(f"Cloned {repo_url} -> {dest}")  # never print clone_url -- it may embed a token
+    n = sum(1 for _ in Path(dest).rglob("*"))
+    print(f"Cloned {repo_url} -> artifact ({n} entries)")  # never print clone_url
 
 
 # -- Stage 2: Generate PDFs -----------------------------------------------------
@@ -99,8 +106,8 @@ def generate_pdfs(
     import subprocess, sys, os, urllib.request
     from pathlib import Path
 
-    repo = Path(repo_dir.path, "repo_path.txt").read_text().strip()
-    sys.path.insert(0, str(Path(repo) / "workshop"))
+    repo = Path(repo_dir.path) / "repo"
+    sys.path.insert(0, str(repo / "workshop"))
 
     out = Path(pdf_dir.path)
     out.mkdir(parents=True, exist_ok=True)
@@ -125,102 +132,101 @@ def generate_pdfs(
         raise RuntimeError("PDF generation failed")
 
     pdfs = list(out.glob("*.pdf"))
+    # Fail here rather than hand an empty artifact to the next stage. This
+    # step used to report success on zero PDFs, so the real error surfaced
+    # two stages later as "did stage 2 run?".
+    if not pdfs:
+        raise RuntimeError(
+            f"generate_sekki_pdfs.py wrote nothing to {out}. It must honour "
+            "SEKKI_PDF_OUT."
+        )
     print(f"Generated {len(pdfs)} PDFs -> {out}")
 
 
-# -- Stage 3: Download Docling models ------------------------------------------
+# -- Stage 3: Convert PDFs via a docling-serve endpoint ------------------------
 
-@dsl.component(base_image=DOCLING_BASE_IMAGE)
-def download_docling_models(
-    artifacts_dir: dsl.Output[dsl.Artifact],
-):
-    # All imports inside component body -- KFP v2 requirement
-    from pathlib import Path
-    from docling.utils.model_downloader import download_models
-
-    out = Path(artifacts_dir.path)
-    out.mkdir(parents=True, exist_ok=True)
-    download_models(output_dir=out, progress=True, with_layout=True, with_tableformer=True)
-    print(f"Docling models downloaded -> {out}")
-
-
-# -- Stage 4: Convert PDFs with Docling ----------------------------------------
-
-@dsl.component(base_image=DOCLING_BASE_IMAGE)
-def convert_with_docling(
+@dsl.component(
+    base_image=PYTHON_BASE_IMAGE,
+    packages_to_install=["httpx>=0.27"],
+)
+def convert_via_docling_serve(
     pdf_dir:        dsl.Input[dsl.Artifact],
-    artifacts_dir:  dsl.Input[dsl.Artifact],
     chunks_dir:     dsl.Output[dsl.Artifact],
-    embedding_model: str = "ibm-granite/granite-embedding-125m-english",
-    max_tokens:     int = 400,
+    docling_url:    str,
+    docling_model:  str = "Docling",
+    min_chars:      int = 200,
 ):
-    import json
+    """Convert each PDF to markdown with a remote docling-serve.
+
+    This replaces two earlier stages that pip-installed Docling and downloaded
+    its layout and tableformer models into the pod. That cost several GB and
+    minutes per run for a conversion the platform can already do, and on a
+    busy node it filled ephemeral storage and got the pod evicted.
+
+    The API key is read from DOCLING_KEY in the environment, not passed as a
+    pipeline parameter -- parameters are visible in the run UI. Attach it with
+    kfp.kubernetes.use_secret_as_env in the pipeline definition.
+    """
+    import base64, json, os, re
     from pathlib import Path
-    from docling.document_converter import DocumentConverter, PdfFormatOption
-    from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
-    from docling.chunking import HybridChunker
-    from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
-    from transformers import AutoTokenizer
+    import httpx
 
-    pdf_path   = Path(pdf_dir.path)
-    art_path   = Path(artifacts_dir.path)
-    out_path   = Path(chunks_dir.path)
-    out_path.mkdir(parents=True, exist_ok=True)
+    key = os.environ.get("DOCLING_KEY", "")
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    base = docling_url.rstrip("/")
 
-    # Configure Docling pipeline (CPU-safe)
-    pipeline_options = PdfPipelineOptions()
-    pipeline_options.artifacts_path = art_path
+    out = Path(chunks_dir.path)
+    out.mkdir(parents=True, exist_ok=True)
+    pdfs = sorted(Path(pdf_dir.path).glob("*.pdf"))
+    if not pdfs:
+        raise RuntimeError(f"No PDFs in {pdf_dir.path} -- did stage 2 run?")
 
-    converter = DocumentConverter(
-        format_options={
-            "pdf": PdfFormatOption(
-                pipeline_cls=StandardPdfPipeline,
-                pipeline_options=pipeline_options,
-            )
-        }
-    )
-
-    # HuggingFace tokenizer for semantic chunking -- must match the embedding
-    # model's own tokenizer so token-count estimates are accurate (Docling's
-    # own chunking guidance).
-    hf_tokenizer = AutoTokenizer.from_pretrained(embedding_model)
-    chunker = HybridChunker(
-        tokenizer=HuggingFaceTokenizer(tokenizer=hf_tokenizer, max_tokens=max_tokens),
-        merge_peers=True,
-    )
-
-    all_chunks = []
-    pdfs = sorted(pdf_path.glob("*.pdf"))
-    print(f"Converting {len(pdfs)} PDFs...")
-
+    all_chunks, failed = [], []
     for pdf in pdfs:
-        sekki_id = pdf.stem
-        print(f"  {pdf.name}")
-        result = converter.convert(str(pdf))
+        payload = {
+            # Required even on the passthrough route: the gateway needs it to
+            # choose a deployment. Without it: {"detail": "'model' is required"}.
+            "model": docling_model,
+            "options": {"to_formats": ["md"], "do_ocr": False},
+            "sources": [{
+                "kind": "file",
+                "base64_string": base64.b64encode(pdf.read_bytes()).decode(),
+                "filename": pdf.name,
+            }],
+        }
+        r = httpx.post(f"{base}/docling/v1/convert/source",
+                       json=payload, headers=headers, timeout=300)
+        r.raise_for_status()
+        md = (r.json().get("document") or {}).get("md_content") or ""
+        # Docling embeds page images as base64 data URIs. On these documents
+        # that is roughly 85% of the payload and none of it is retrievable.
+        md = re.sub(r"!\[Image\]\(data:image/[^)]+\)", "", md).strip()
+        if len(md) < min_chars:
+            failed.append(pdf.name)
+            print(f"  {pdf.name}: only {len(md)} chars, skipped")
+            continue
+        print(f"  {pdf.name}: {len(md)} chars")
+        # One chunk per sekki. These are ~3.5k characters, inside the embedding
+        # window, and the sekki is the unit a guest asks about -- splitting it
+        # separates a dish from the season that justifies it.
+        all_chunks.append({
+            "id":       f"{pdf.stem}__chunk_000",
+            "text":     md,
+            "sekki_id": pdf.stem,
+            "source":   pdf.name,
+            "chunk":    0,
+        })
 
-        # Save markdown alongside chunks
-        md_path = out_path / f"{sekki_id}.md"
-        result.document.save_as_markdown(md_path)
-
-        for i, chunk in enumerate(chunker.chunk(result.document)):
-            text = chunk.text.strip()
-            if len(text) < 30:
-                continue
-            all_chunks.append({
-                "id":       f"{sekki_id}__chunk_{i:03d}",
-                "text":     text,
-                "sekki_id": sekki_id,
-                "source":   pdf.name,
-            })
-
-    # Write chunks JSONL (same pattern as opendatahub reference)
-    jsonl_path = out_path / "sekki_chunks.jsonl"
-    with open(jsonl_path, "w", encoding="utf-8") as f:
+    jsonl = out / "sekki_chunks.jsonl"
+    with open(jsonl, "w", encoding="utf-8") as f:
         for c in all_chunks:
             f.write(json.dumps(c, ensure_ascii=False) + "\n")
 
-    print(f"Extracted {len(all_chunks)} chunks -> {jsonl_path}")
+    if not all_chunks:
+        raise RuntimeError("Every PDF failed to convert -- check docling_url and DOCLING_KEY.")
+    print(f"Converted {len(all_chunks)}/{len(pdfs)} -> {jsonl}")
+    if failed:
+        print("Skipped:", ", ".join(failed))
 
 
 # -- Stage 5: Ingest into LlamaStack Milvus ------------------------------------
@@ -369,6 +375,11 @@ def sekki_ingestion_pipeline(
     embedding_model:    str = EMBED_MODEL,
     mlflow_uri:         str = MLFLOW_URI,
     mlflow_experiment:  str = MLFLOW_EXP,
+    docling_url:        str = DOCLING_URL,
+    docling_model:      str = DOCLING_MODEL,
+    # Name of a Secret in the run namespace holding the gateway token under
+    # the key "token". Empty means an unauthenticated docling-serve.
+    docling_secret:     str = DOCLING_SECRET,
 ):
     # Stage 1 -- public repo, cloned anonymously. If you fork privately, attach
     # your own Secret here with kfp.kubernetes.use_secret_as_env, mapping it to
@@ -382,22 +393,23 @@ def sekki_ingestion_pipeline(
     pdfs.set_memory_request("512M").set_memory_limit("1G")
     pdfs.set_cpu_request("250m").set_cpu_limit("1")
 
-    # Stage 3 -- model download (allow caching -- expensive and static)
-    models = download_docling_models()
-    models.set_memory_request("1G").set_memory_limit("4G")
-    models.set_cpu_request("500m").set_cpu_limit("2")
-
-    # Stage 4 -- Docling conversion (most expensive step)
-    chunks = convert_with_docling(
+    # Stage 3 -- conversion through the platform's Docling endpoint.
+    chunks = convert_via_docling_serve(
         pdf_dir=pdfs.outputs["pdf_dir"],
-        artifacts_dir=models.outputs["artifacts_dir"],
-        embedding_model=embedding_model,
+        docling_url=docling_url,
+        docling_model=docling_model,
     )
     chunks.set_caching_options(False)
-    chunks.set_memory_request("2G").set_memory_limit("6G")
-    chunks.set_cpu_request("500m").set_cpu_limit("4")
+    chunks.set_memory_request("512M").set_memory_limit("1G")
+    chunks.set_cpu_request("250m").set_cpu_limit("1")
+    if docling_secret:
+        kubernetes.use_secret_as_env(
+            chunks,
+            secret_name=docling_secret,
+            secret_key_to_env={"token": "DOCLING_KEY"},
+        )
 
-    # Stage 5
+    # Stage 4
     ingest = ingest_to_vector_store(
         chunks_dir=chunks.outputs["chunks_dir"],
         llamastack_base=llamastack_base,
@@ -406,7 +418,7 @@ def sekki_ingestion_pipeline(
     )
     ingest.set_caching_options(False)
 
-    # Stage 6
+    # Stage 5
     verify = verify_and_log(
         chunks_dir=chunks.outputs["chunks_dir"],
         vector_store_id_out=ingest.outputs["vector_store_id_out"],

@@ -16,15 +16,19 @@ from fpdf import FPDF
 sys.path.insert(0, str(Path(__file__).parent))
 from sekki_data import SEKKI
 
-OUT_DIR = Path(__file__).parent / "sekki_pdfs"
-OUT_DIR.mkdir(exist_ok=True)
+# Both are overridable so a pipeline step can point this at its output
+# artifact and at a font it has already fetched. The sekki pipeline sets
+# them; before this they were ignored and the step produced an empty
+# artifact while still reporting success.
+OUT_DIR = Path(os.environ.get("SEKKI_PDF_OUT") or Path(__file__).parent / "sekki_pdfs")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 FONT_DIR = Path(__file__).parent / "fonts"
 FONT_DIR.mkdir(exist_ok=True)
 
 # ── Download NotoSansJP if missing ─────────────────────────────────────────────
 FONT_URL = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf"
-FONT_PATH = FONT_DIR / "NotoSansJP.ttf"
+FONT_PATH = Path(os.environ.get("NOTO_FONT_PATH") or FONT_DIR / "NotoSansJP.ttf")
 
 if not FONT_PATH.exists():
     print("Downloading NotoSansJP font...")
