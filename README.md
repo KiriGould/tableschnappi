@@ -412,7 +412,7 @@ Helm hooks run automatically in order:
 | `rhoai.vllmEndpoint` / `rhoai.vllmModel` | `""` | Legacy aliases for `model.endpoint` / `model.name`. Still honoured so older values files keep working; prefer the `model` block |
 | `assistant.enabled` | `true` | Deploy the assistant (chat, tool loop, shields). Turning this off removes chat entirely |
 | `mlflow.enabled` | `true` | MLflow tracing, prompt registry, and the seed/wait hooks. Independent of `assistant.enabled` — with this off, chat still works using the built-in prompt, without tracing |
-| `guardrails.enabled` | `true` | Deploy NeMo Guardrails CR |
+| `guardrails.enabled` | `true` | Deploy the NeMo Guardrails CR. Needs the `trustyai` component. Works with an authenticated gateway — the token is injected as an env var, never written to the ConfigMap. See [Guardrails](#guardrails) |
 | `mcp.enabled` | `true` | Deploy MCP server + gateway registration |
 | `genaiStudio.enabled` | `false` | Create ConfigMap in `redhat-ods-applications`. This is a shared, cluster-wide singleton — enabling it for more than one concurrent participant install will cause ownership conflicts or data loss on uninstall. Leave disabled for workshop use; apply once, out-of-band, for a single admin-managed install. |
 | `garak.enabled` | `false` | Run Garak safety evaluation post-install. Needs an image you build yourself |
@@ -576,6 +576,59 @@ actually rests on.
 > `dan.*` detector instead of garak's recommended set, because the set adds
 > `mitigation.MitigationBypass`, which recognises refusals by matching English
 > phrases — a model that refused in Chinese was scored as jailbroken.
+
+## Guardrails
+
+NeMo Guardrails, deployed by the TrustyAI operator, puts an input rail in front
+of the model: an off-topic question is refused by the rail before the agent
+ever runs.
+
+This is worth separating from what the system prompt already does. Without
+guardrails the assistant still declines off-topic questions, because its prompt
+tells it to — but that is the model choosing to comply, and it is what prompt
+injection attacks. The rail is a separate check that does not depend on the
+model's goodwill.
+
+### Turning it on
+
+```bash
+helm upgrade --install tableschnappi charts/tableschnappi \
+  --set guardrails.enabled=true \
+  ...
+```
+
+It needs the `trustyai` component `Managed` in the DataScienceCluster, which
+provides the `NemoGuardrails` CRD.
+
+**It works against an authenticated MaaS gateway.** Set `model.apiKey` (or
+`model.existingSecret`) as usual and the chart handles the rest: the token is
+injected into the guardrails pod as `OPENAI_API_KEY` from the Secret, and the
+`api_key` field is omitted from the config. That matters because the config is
+a ConfigMap, readable by anyone with `get configmaps` in the namespace — a
+bearer token must not go in one. Unauthenticated in-cluster endpoints still get
+`api_key: EMPTY` in the config, as before.
+
+> The guardrails pod can sit in `Init` for around four minutes before it
+> starts. That is normal, not a hang.
+
+### Two honest limitations
+
+- **The shield fails open.** If the guardrails pod is unreachable the assistant
+  logs a warning and lets the turn through, rather than refusing it. That is
+  the right trade for a demo whose job is to keep answering and the wrong one
+  for production. It also means a broken shield looks exactly like a working
+  one from the outside — check `/api/assistant/health`, which reports
+  `guardrails_enabled`.
+- **There is one input rail and no output rail.** The assistant does run an
+  output shield in code, which re-asks the input classifier about the bot's own
+  reply, but that is a second round-trip per turn and will rarely fire.
+
+### Why `values-maas.yaml` ships with it off
+
+Not because MaaS cannot have guardrails — it can, see above. It is off in that
+profile because the profile's purpose is the fewest cluster prerequisites
+possible, and guardrails needs the TrustyAI operator. Turn it on with
+`--set guardrails.enabled=true` if your cluster has it.
 
 ## Seasonal knowledge (sekki) — optional RAG
 

@@ -75,8 +75,15 @@ mcp:
 mlflow:
   enabled: true
 
-# Off: needs the TrustyAI operator for the NeMo Guardrails CRD. The assistant
-# skips the shield calls; the in-code reservation checks still apply.
+# Off: this profile aims for the fewest cluster prerequisites, and guardrails
+# needs the TrustyAI operator for the NemoGuardrails CRD. The assistant skips
+# the shield calls; the in-code reservation checks still apply, and the attack
+# demo reports "no rails" rather than claiming the model was jailbroken.
+#
+# This is NOT a MaaS limitation. Guardrails works fine against an
+# authenticated gateway -- the chart injects model.apiKey into the guardrails
+# pod as OPENAI_API_KEY rather than writing it into the ConfigMap. If your
+# cluster has TrustyAI, turn this on with --set guardrails.enabled=true.
 guardrails:
   enabled: false
 
