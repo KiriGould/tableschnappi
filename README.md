@@ -163,8 +163,8 @@ Two extras are **off by default** and are opt-in rather than part of this path:
 
 | Requirement | Version |
 |---|---|
-| Red Hat OpenShift AI | 3.5+ |
-| Red Hat Connectivity Link | 1.4+ |
+| Red Hat OpenShift AI | 3.5+ (verified on 3.5.2 and 3.6.0-ea.2 — see [MLflow on RHOAI 3.6 and later](#mlflow-on-rhoai-36-and-later)) |
+| Red Hat Connectivity Link | 1.4+ — only for MCP gateway registration and LLMInferenceService auth; the app runs without it |
 | OpenShift Service Mesh 3 | 3.4+ |
 | Helm | 3.14+ |
 | `oc` CLI | 4.19+ |
@@ -271,6 +271,88 @@ oc get gateway -n openshift-ingress
 ```
 
 After this, deploy a model via the RHOAI dashboard with **"Add as AI asset endpoint"** checked. The model's LLMInferenceService should reach `Ready: True`.
+
+## MLflow on RHOAI 3.6 and later
+
+**3.6 does not ship a running MLflow tracking server.** 3.5 did, at
+`https://mlflow.redhat-ods-applications.svc:8443/mlflow`, which is what most
+of this README assumes. On 3.6 you get the operator and the dashboard UI, and
+nothing to track against — so the `wait-mlflow` hook spends five minutes
+failing and the install aborts.
+
+Check before you install:
+
+```bash
+oc get mlflows.mlflow.opendatahub.io
+```
+
+An empty list means you need an instance. The CR is **cluster-scoped**, so this
+is an admin step, done once:
+
+```bash
+cat <<'EOF' | oc apply -f -
+apiVersion: mlflow.opendatahub.io/v1
+kind: MLflow
+metadata:
+  name: mlflow
+spec:
+  storage:
+    accessModes: ["ReadWriteOnce"]
+    resources:
+      requests:
+        storage: 10Gi
+  backendStoreUri:  "sqlite:////mlflow/mlflow.db"
+  registryStoreUri: "sqlite:////mlflow/mlflow.db"
+  defaultArtifactRoot: "/mlflow/artifacts"
+EOF
+```
+
+That comes up on the same `mlflow:8443` service 3.5 used, so `rhoai.mlflowUri`
+needs no change. SQLite on a PVC is fine for a workshop; point
+`backendStoreUri` at Postgres if you want something durable.
+
+> The admission webhook reports its requirements one at a time — first
+> `defaultArtifactRoot` and `backendStoreUri`, then `storage must be
+> configured` once it sees a file-based store. The manifest above satisfies
+> all of them.
+
+Confirm it answers before installing the chart:
+
+```bash
+oc get mlflows.mlflow.opendatahub.io   # Available should be True
+```
+
+## Components a fresh DSC leaves switched off
+
+Enabling a component in the DataScienceCluster is not the same as it being on
+by default. On a fresh 3.6 cluster, two the chart needs ship as `Removed`:
+
+```bash
+oc patch dsc default-dsc --type=merge -p '{
+  "spec": {"components": {
+    "aigateway":            {"managementState": "Managed"},
+    "mcplifecycleoperator": {"managementState": "Managed"},
+    "llamastackoperator":   {"managementState": "Removed"}
+  }}
+}'
+```
+
+`llamastackoperator` is set explicitly because a fresh DSC leaves it *unset*,
+which is not the same as `Removed` — and it blocks OGX.
+
+Two things that look like failures and are not:
+
+- **`Ready: False` on the DSC may be about a component you do not use.** On our
+  3.6 cluster `trainer` is `Managed` by default and blocks the top-level
+  condition with "JobSet Operator is not installed". Set it `Removed` if you
+  are not training. Conditions for `Removed` components also read `False`
+  (Kueue, SparkOperator, BatchGateway, ModelsAsAService), which is expected.
+- **Red Hat Connectivity Link is often absent on demo clusters**, so
+  `mcpserverregistrations.mcp.kuadrant.io` will not exist even with
+  `mcplifecycleoperator: Managed`. The chart only needs that CRD when
+  `rhoai.maasHost` is set; leave it empty and the MCP server still deploys and
+  still serves the assistant. You lose only the gateway registration and
+  LLMInferenceService auth.
 
 ## Install the workshop chart
 

@@ -40,7 +40,31 @@ spec:
                 echo "  attempt $i/60 — retrying in 5s..."
                 sleep 5
               done
-              echo "ERROR: MLflow not reachable after 5 minutes." && exit 1
+              # The old message here was just "not reachable", which reads like a
+              # typo in the URI. The usual cause on RHOAI 3.6+ is different and
+              # much less guessable: the operator is installed but nobody has
+              # created an MLflow instance, so there is no tracking server to
+              # reach. Say which of the two it is.
+              echo ""
+              echo "ERROR: MLflow did not answer at the URI above after 5 minutes."
+              echo ""
+              echo "Most likely causes, in order:"
+              echo ""
+              echo "  1. No MLflow instance exists. RHOAI 3.6 ships the operator but"
+              echo "     no tracking server -- 3.5 shipped one, which is why this is"
+              echo "     easy to miss. Check with:"
+              echo "         oc get mlflows.mlflow.opendatahub.io"
+              echo "     An empty list means you need to create one; see the README"
+              echo "     section 'MLflow on RHOAI 3.6 and later'."
+              echo ""
+              echo "  2. rhoai.mlflowUri points somewhere else. Find the real one:"
+              echo "         oc get svc -A | grep -w mlflow"
+              echo ""
+              echo "  3. This namespace cannot reach it, or the ServiceAccount token"
+              echo "     is not accepted by the tracking server."
+              echo ""
+              echo "To install without tracing instead: --set mlflow.enabled=false"
+              exit 1
           resources:
             requests:
               memory: "32Mi"
