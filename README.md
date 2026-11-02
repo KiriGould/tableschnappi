@@ -435,6 +435,68 @@ Helm hooks run automatically in order:
 
 > **Note on persistence:** the backend uses an in-memory store seeded at startup. Data resets on pod restart — intentional for workshop use so each participant starts fresh.
 
+## What the app actually has
+
+Five screens, each of which exists to demonstrate something. The routes below
+are relative to the frontend Route.
+
+| Route | Screen | What it is for |
+|---|---|---|
+| `/` | Visitor page | Floor plan, booking chat, the attack demo, the garak panel |
+| `/menu/<slug>/<table>` | QR menu | Seasonal menu, ordering, chat tagged by table |
+| `/staff/<slug>` | Staff dashboard | Live floor state, orders, a sales summary card |
+| `/dashboard/<slug>` | Sales dashboard | Dish performance, revenue share, seasonal mix, footprint |
+| — | `/api/restaurants/<slug>/analytics` | The JSON behind the sales dashboard |
+
+### Sales dashboard
+
+A manager's view: which dishes earn, which never sell, what the seasonal mix of
+actual orders looks like, and the estimated footprint of what was sold.
+
+Two deliberate refusals, both worth pointing at in a demo:
+
+- **It withholds advice under 20 orders.** Below that threshold most of the
+  menu shows zero sales purely because little has been ordered at all, so
+  "de-list these nine dishes" would be a conclusion the data cannot carry. The
+  counts are still shown; the recommendation is not.
+- **There is no "CO2 saved" figure**, and there will not be one. Seasonality
+  does not change an ingredient's emission factor, and the counterfactual —
+  what a guest would have ordered instead — is unknowable. What the dashboard
+  does show is the footprint of the mix that was actually sold against the
+  menu average, which is a real comparison between two computed numbers.
+
+The per-dish CO2e numbers are **estimates**, not measurements: published
+per-kilogram emission factors (Poore & Nemecek, 2018, global medians) applied
+to approximate portion weights. Good enough to rank dishes, not to report.
+
+### Attack demo
+
+A floating mascot on the visitor page that fires prompt injections at the live
+chat and reacts to what comes back. The payloads are in-domain and graded easy
+/ medium / hard.
+
+It has three verdicts, and the third is the point. **Blocked** when the
+guardrails refusal marker comes back. **Bypassed** when it does not and
+guardrails are deployed. **No rails** when guardrails are not deployed at all —
+because then the marker can never appear, and reporting that as a jailbreak
+would blame the model for the absence of a shield. The page reads
+`/api/assistant/health` on mount to tell the last two apart.
+
+### Seasonal menu and the sekki widget
+
+The menu is filtered and labelled against the European growing year, and a
+widget shows the current Japanese solar term. That much works from a built-in
+calendar with no extra infrastructure. Grounding the assistant's
+recommendations in retrieved seasonal knowledge is the optional RAG feature —
+see [Seasonal knowledge (sekki)](#seasonal-knowledge-sekki--optional-rag).
+
+### Garak panel
+
+On-demand red-team sweep from the visitor page; see
+[Garak red-team evaluation](#5-garak-red-team-evaluation-optional). Probes that
+produce nothing scoreable report `NO RESULT` rather than being folded into the
+score as passes.
+
 ## Workshop Guide
 
 ### 1. Explore the live app
