@@ -20,14 +20,15 @@ data:
         model: {{ include "tableschnappi.modelName" . }}
         parameters:
           base_url: {{ include "tableschnappi.modelEndpoint" . }}/v1
-          # LIMITATION: this config lives in a ConfigMap, so a bearer token
-          # cannot be put here without exposing it to anyone with configmap
-          # read access in the namespace. Guardrails therefore only works
-          # against an endpoint that needs no auth — typically an in-cluster
-          # vLLM. Against an authenticated MaaS gateway, set
-          # guardrails.enabled=false; the in-code reservation checks and the
-          # system prompt still apply.
+          # The token is NOT written here. This config is a ConfigMap, readable
+          # by anyone with get on configmaps in the namespace. For an
+          # authenticated endpoint the key is omitted entirely and injected as
+          # OPENAI_API_KEY on the pod instead (see env: on the CR below) —
+          # LangChain's ChatOpenAI, which NeMo Guardrails builds from these
+          # parameters, falls back to that variable when no api_key is given.
+          {{- if not (include "tableschnappi.modelAuthEnabled" .) }}
           api_key: EMPTY
+          {{- end }}
           ssl_verify: false
           extra_body:
             chat_template_kwargs:
@@ -75,4 +76,16 @@ spec:
       configMaps:
         - {{ include "tableschnappi.fullname" . }}-guardrails-config
       default: true
+  {{- if include "tableschnappi.modelAuthEnabled" . }}
+  # Lets guardrails reach an authenticated MaaS gateway. Without this the
+  # config had to hardcode api_key: EMPTY, so guardrails only worked against
+  # an unauthenticated in-cluster vLLM — and against MaaS it would 401,
+  # which the assistant's shield treats as unreachable and fails open.
+  env:
+    - name: OPENAI_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: {{ include "tableschnappi.modelSecretName" . }}
+          key: token
+  {{- end }}
 {{- end }}
